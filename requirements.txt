@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+google-genai>=2.31
+pymupdf
+python-docx
+openpyxl
+xlrd
+requests
+lxml

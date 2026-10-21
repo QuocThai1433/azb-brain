@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AZB Brain</title>
+  <meta name="theme-color" content="#004c97">
+  <link rel="icon" type="image/png" href="/static/logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap">
+  <link rel="stylesheet" href="/static/styles.css?v=19">
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+</head>
+<body>
+  <aside class="sidebar" id="sidebar">
+    <div class="side-brand">
+      <div class="logo-card2"><img class="side-logo" src="/static/logo-white.png" alt="AZB – Build Trust on Discipline"></div>
+      <div class="side-app">Brain · Tri thức điều hành</div>
+    </div>
+    <nav id="nav">
+      <div class="nav-group">Điều hành</div>
+      <button data-view="overview" class="active"><svg data-icon="home"></svg><span>Tổng quan</span></button>
+      <button data-view="chart"><svg data-icon="org"></svg><span>Sơ đồ tổ chức</span></button>
+      <button data-view="units"><svg data-icon="building"></svg><span>Phòng ban</span></button>
+      <button data-view="people"><svg data-icon="users"></svg><span>Nhân sự</span></button>
+      <div class="nav-group">Tri thức</div>
+      <button data-view="docs"><svg data-icon="file"></svg><span>Tài liệu</span></button>
+      <button data-view="insights"><svg data-icon="chart"></svg><span>Phân tích</span></button>
+      <button data-view="chat"><svg data-icon="spark"></svg><span>Trợ lý AI</span><em class="nav-tag">AI</em></button>
+      <div class="nav-group">Hệ thống</div>
+      <button data-view="users"><svg data-icon="shield"></svg><span>Tài khoản</span></button>
+      <button data-view="access"><svg data-icon="key"></svg><span>Quyền truy cập</span><em class="nav-tag" id="access-badge" hidden></em></button>
+    </nav>
+    <div class="side-foot"><div id="userbox"></div><div class="copy">© Công ty Cổ phần AZB</div></div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+
+  <div class="shell">
+    <header class="topbar">
+      <button class="icon-btn menu-btn" id="menu-btn" title="Menu"><svg data-icon="menu"></svg></button>
+      <div class="crumbs"><span class="muted">AZB Brain</span><svg data-icon="chev"></svg><b id="page-title">Tổng quan</b></div>
+    </header>
+    <main id="main"></main>
+  </div>
+
+  <dialog id="modal">
+    <form method="dialog" id="modal-form">
+      <h3 id="modal-title"></h3>
+      <div id="modal-body"></div>
+      <div class="modal-actions">
+        <button type="button" class="ghost" id="modal-cancel">Huỷ</button>
+        <button type="submit" class="primary" id="modal-ok">Lưu</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js?v=23"></script>
+</body>
+</html>
