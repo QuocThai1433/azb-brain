@@ -1,0 +1,2 @@
+Backup giao dien cu truoc khi nang cap UI (21/10/2026)
+Khoi phuc: xoa thu muc frontend, copy frontend-UI-cu-20261021 thanh frontend. Database: azb-20261021.db -> data/azb.db
