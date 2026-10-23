@@ -467,8 +467,18 @@ def _prepare_history(history: list[dict]) -> tuple[list[dict], str]:
     return out + current, note
 
 
-def new_audit() -> dict:
-    return {"flags": [], "docs_read": set(), "exports": []}
+def new_audit(progress=None) -> dict:
+    """`progress(tên_công_cụ)` (tuỳ chọn) được gọi mỗi khi AI bắt đầu tra cứu; dùng để báo tiến trình khi trả lời theo luồng."""
+    return {"flags": [], "docs_read": set(), "exports": [], "progress": progress}
+
+
+def _progress(audit: dict, name: str) -> None:
+    cb = audit.get("progress")
+    if cb:
+        try:
+            cb(name)
+        except Exception:  # báo tiến trình lỗi không được làm hỏng câu trả lời
+            pass
 
 
 def answer(history: list[dict], user: dict, audit: dict | None = None, memory: str = "") -> dict:
@@ -615,6 +625,7 @@ def _answer_gemini(history: list[dict], model: str, system: str, user: dict, aud
             results = []
             for call in calls:
                 tools_used.append(call.name)
+                _progress(audit, call.name)
                 try:
                     out = _run_tool(call.name, dict(call.args or {}), user, audit)
                     payload = {"result": json.loads(json.dumps(out, ensure_ascii=False, default=str))}
@@ -713,6 +724,7 @@ def _answer_groq(history: list[dict], model: str, system: str, user: dict, audit
                 for call in calls:
                     name = call["function"]["name"]
                     tools_used.append(name)
+                    _progress(audit, name)
                     try:
                         args = json.loads(call["function"].get("arguments") or "{}")
                         content = _tool_payload(_run_tool(name, args, user, audit, char_budget=GROQ_TOOL_CHARS))

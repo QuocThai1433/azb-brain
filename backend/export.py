@@ -388,3 +388,86 @@ def find(user_id: int, token: str) -> Path | None:
 
 def display_name(path: Path) -> str:
     return path.name.split("__", 1)[1]
+
+
+# ---------- Báo cáo tiến độ mục tiêu (nút "Xuất Excel" ở trang Mục tiêu doanh thu) ----------
+_TARGET_STATUS = {"ok": "Đạt", "watch": "Cần theo dõi", "behind": "Chậm", "no_data": "Chưa có số"}
+
+
+def _safe_cell(ws, row: int, col: int, value):
+    """Ghi ô; chuỗi bắt đầu bằng = + - @ luôn là văn bản, không bao giờ thành công thức."""
+    c = ws.cell(row=row, column=col, value=value)
+    if isinstance(value, str):
+        c.data_type = "s"
+    return c
+
+
+def targets_xlsx(progress: dict) -> bytes:
+    """Dựng file Excel từ kết quả analytics.target_progress (đã lọc theo quyền người xem)."""
+    from io import BytesIO
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Tiến độ mục tiêu"
+    thin = Side(style="thin", color="D0D7E2")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    period, elapsed = progress.get("period"), progress.get("elapsed_pct")
+    _safe_cell(ws, 1, 1, f"Tiến độ mục tiêu doanh thu · kỳ {period or '—'}").font = Font(bold=True, size=14, color=BRAND_DARK)
+    _safe_cell(ws, 2, 1, f"Đã qua {elapsed}% thời gian của kỳ. Dự báo tính theo tốc độ hiện tại." if elapsed is not None else "")
+    heads = ["Đơn vị", "Chỉ tiêu", "Đơn vị tính", "Mục tiêu", "Thực hiện", "Còn thiếu", "% đạt", "Dự báo cuối kỳ", "% mục tiêu (dự báo)", "Trạng thái"]
+    for i, h in enumerate(heads, 1):
+        c = _safe_cell(ws, 4, i, h)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor=BRAND)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = border
+    metric = {"doanh_thu": "Doanh thu", "doanh_so": "Doanh số", "loi_nhuan": "Lợi nhuận", "khac": "Chỉ tiêu khác"}
+    r = 5
+    for t in progress.get("items", []):
+        tv, av = t.get("target_value"), t.get("actual_value")
+        name = t.get("metric_name") if t.get("metric") == "khac" and t.get("metric_name") else metric.get(t.get("metric"), t.get("metric"))
+        vals = [t.get("unit_name") or "Toàn công ty", name, t.get("unit_label") or "", tv, av,
+                max(tv - av, 0) if tv is not None and av is not None else None,
+                t["pct"] / 100 if t.get("pct") is not None else None, t.get("forecast_value"),
+                t["forecast_pct"] / 100 if t.get("forecast_pct") is not None else None, _TARGET_STATUS[t["status"]]]
+        for i, v in enumerate(vals, 1):
+            c = _safe_cell(ws, r, i, _text(v) if isinstance(v, str) else v)
+            c.border = border
+            if i in (4, 5, 6, 8):
+                c.number_format = "#,##0"
+            elif i in (7, 9):
+                c.number_format = "0.0%"
+        r += 1
+    for i, w in enumerate([26, 18, 12, 18, 18, 18, 10, 20, 18, 16], 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A5"
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def history_xlsx(rows: list[list]) -> bytes:
+    """File Excel lịch sử thay đổi; `rows` là các dòng đã định dạng sẵn thành chữ, cột khớp `heads`."""
+    from io import BytesIO
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Lịch sử thay đổi"
+    heads = ["Thời gian", "Người thực hiện", "Thao tác", "Loại", "Đối tượng", "Thay đổi", "Đã hoàn tác"]
+    thin = Side(style="thin", color="D0D7E2")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for i, h in enumerate(heads, 1):
+        c = _safe_cell(ws, 1, i, h)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor=BRAND)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = border
+    for r, line in enumerate(rows, 2):
+        for i, v in enumerate(line, 1):
+            c = _safe_cell(ws, r, i, _text(v))
+            c.border = border
+            c.alignment = Alignment(vertical="top", wrap_text=i in (5, 6))
+    for i, w in enumerate([20, 22, 12, 14, 34, 70, 12], 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A2"
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

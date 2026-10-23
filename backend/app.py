@@ -4,16 +4,18 @@ Chạy: .venv\\Scripts\\python -X utf8 -m uvicorn backend.app:app --port 8000
 """
 import json
 import os
+import queue
 import shutil
+import threading
 import time
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import access, ai, analytics, auth, backup, contacts, documents, export, guard, hr_import, memory, offboarding, privatefiles, selfinfo, webimport
+from . import access, ai, analytics, auditlog, auth, backup, contacts, documents, export, guard, hr_import, memory, offboarding, privatefiles, selfinfo, semantic, webimport
 from .db import connect, init_db, row, rows
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
@@ -50,6 +52,7 @@ def _startup() -> None:
     init_db()
     documents.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
+        _backfill_history_labels(conn)
         documents.sync_ai_index(conn)  # dựng sẵn chỉ mục tìm kiếm cho trợ lý AI (lần đầu ~2 giây, sau đó chỉ cập nhật phần đổi)
         empty = conn.execute("SELECT COUNT(*) FROM units").fetchone()[0] == 0
     if empty:
@@ -57,6 +60,7 @@ def _startup() -> None:
         seed()
     backup.start_scheduler()  # sao lưu database + file gốc định kỳ (xem backend/backup.py)
     memory.start_scheduler()  # trích ghi chú cá nhân từ các đoạn chat đã dừng (chỉ cho người dùng đã bật bộ nhớ)
+    semantic.start_scheduler()  # vector tìm theo ý nghĩa cho tài liệu (chỉ khi có GEMINI_API_KEY)
 
 
 @app.middleware("http")
@@ -73,9 +77,11 @@ async def _auth_middleware(request: Request, call_next):
     return response
 
 
-def _log(conn, user: dict, action: str, entity: str, entity_id=None, detail=None) -> None:
-    conn.execute("INSERT INTO audit_log (action, entity, entity_id, detail, user_id) VALUES (?,?,?,?,?)",
-                 (action, entity, entity_id, detail, user["id"]))
+def _log(conn, user: dict, action: str, entity: str, entity_id=None, detail=None, label=None, snapshot=None) -> int:
+    cur = conn.execute("INSERT INTO audit_log (action, entity, entity_id, detail, user_id, label, snapshot) VALUES (?,?,?,?,?,?,?)",
+                       (action, entity, entity_id, detail, user["id"], label,
+                        json.dumps(snapshot, ensure_ascii=False, default=str) if snapshot is not None else None))
+    return cur.lastrowid
 
 
 # ---------- Đăng nhập ----------
@@ -702,6 +708,295 @@ def list_targets(request: Request, unit_id: int | None = None):
         return rows(conn, sql + " ORDER BY t.period DESC, u.sort_order")
 
 
+PROPOSAL_STATUS = {"new": "Mới", "approved": "Đã duyệt", "in_progress": "Đang thực hiện", "done": "Hoàn thành", "dropped": "Không thực hiện"}
+
+
+class ProposalIn(BaseModel):
+    title: str
+    body: str = ""
+
+
+class ProposalUpdate(BaseModel):
+    status: str | None = None
+    owner: str | None = None
+    note: str | None = None
+
+
+@app.get("/api/proposals")
+def list_proposals(request: Request, status: str | None = None):
+    """Đề xuất cải tiến. Ban TGĐ / quản trị xem tất cả; người khác chỉ xem đề xuất do mình tạo."""
+    user = auth.require_roles(request, auth.AI_ROLES)
+    where, args = [], []
+    if user["role"] not in auth.EDIT_ALL_ROLES:
+        where.append("p.created_by = ?")
+        args.append(user["id"])
+    if status in PROPOSAL_STATUS:
+        where.append("p.status = ?")
+        args.append(status)
+    sql = "SELECT p.*, u.full_name AS author FROM proposals p LEFT JOIN users u ON u.id = p.created_by"
+    sql += (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY p.id DESC LIMIT 500"
+    with connect() as conn:
+        return rows(conn, sql, tuple(args))
+
+
+@app.post("/api/proposals")
+def create_proposal(req: ProposalIn, request: Request):
+    user = auth.require_roles(request, auth.AI_ROLES)
+    title = req.title.strip()[:200]
+    if not title:
+        raise HTTPException(400, "Thiếu tiêu đề đề xuất")
+    with connect() as conn:
+        pid = conn.execute("INSERT INTO proposals (title, body, created_by) VALUES (?, ?, ?)",
+                           (title, req.body.strip()[:8000], user["id"])).lastrowid
+        _log(conn, user, "create", "proposals", pid)
+        return row(conn, "SELECT * FROM proposals WHERE id = ?", (pid,))
+
+
+@app.put("/api/proposals/{pid}")
+def update_proposal(pid: int, req: ProposalUpdate, request: Request):
+    user = auth.require_roles(request, auth.EDIT_ALL_ROLES)  # chỉ Ban TGĐ / quản trị đổi tiến trình
+    fields = req.model_dump(exclude_unset=True)
+    if "status" in fields and fields["status"] not in PROPOSAL_STATUS:
+        raise HTTPException(400, "Trạng thái không hợp lệ")
+    with connect() as conn:
+        if not row(conn, "SELECT id FROM proposals WHERE id = ?", (pid,)):
+            raise HTTPException(404, "Không tìm thấy đề xuất")
+        if fields:
+            sets = ", ".join(f"{k} = ?" for k in fields)
+            conn.execute(f"UPDATE proposals SET {sets}, updated_at = datetime('now','localtime') WHERE id = ?",
+                         (*[(v or None) if isinstance(v, str) else v for v in fields.values()], pid))
+        _log(conn, user, "update", "proposals", pid, ",".join(fields) or None)
+        return row(conn, "SELECT * FROM proposals WHERE id = ?", (pid,))
+
+
+HISTORY_NAME_COL = {"units": "name", "employees": "full_name", "positions": "title", "processes": "name",
+                    "targets": "COALESCE(metric_name, metric) || ' ' || period"}  # biểu thức cố định trong mã, không lấy từ người dùng
+
+
+# Tên trường hiển thị trong lịch sử (dùng chung cho giao diện và file xuất)
+FIELD_LABELS = {
+    "code": "Mã", "name": "Tên", "full_name": "Họ tên / tên đầy đủ", "unit_type": "Loại đơn vị", "parent_id": "Trực thuộc",
+    "color_group": "Nhóm màu", "functions": "Chức năng", "notes": "Ghi chú", "verified": "Đã xác nhận", "sort_order": "Thứ tự",
+    "employee_code": "Mã NV", "display_name": "Tên hiển thị", "email": "Email", "phone": "Số điện thoại",
+    "joined_date": "Ngày vào", "status": "Trạng thái", "job_title": "Chức danh", "grade": "Ngạch", "labor_group": "Nhóm lao động",
+    "unit_id": "Đơn vị", "hr_department": "Phòng ban (HCNS)", "hr_division": "Khối (HCNS)", "birth_date": "Ngày sinh",
+    "contract_term": "Loại hợp đồng", "title": "Chức danh", "title_code": "Mã chức danh", "employee_id": "Nhân sự",
+    "is_head": "Là trưởng đơn vị", "headcount": "Định biên", "version": "Phiên bản", "iso_clause": "Điều khoản ISO",
+    "owner": "Người phụ trách", "related_units": "Đơn vị liên quan", "purpose": "Mục đích", "content": "Nội dung",
+    "effective_date": "Ngày hiệu lực", "period": "Kỳ", "metric": "Chỉ tiêu (mã)", "metric_name": "Chỉ tiêu",
+    "target_value": "Mục tiêu", "actual_value": "Thực tế", "unit_label": "Đơn vị tính",
+}
+HISTORY_MASK = "(đã ẩn)"
+# Hoàn tác thêm/xoá chỉ cho các bảng không kéo theo dữ liệu con (xoá đơn vị/nhân sự có thể làm mất liên kết)
+UNDO_STRUCTURAL = {"targets", "processes", "positions"}
+
+
+def _history_filter(entity, action, user_id, q, date_from, date_to) -> tuple[str, list]:
+    tables = [entity] if entity in WRITABLE else list(WRITABLE)
+    actions = [action] if action in ("create", "update", "delete") else ["create", "update", "delete"]
+    where = [f"l.action IN ({','.join('?' * len(actions))})", f"l.entity IN ({','.join('?' * len(tables))})"]
+    params: list = [*actions, *tables]
+    if user_id:
+        where.append("l.user_id = ?")
+        params.append(user_id)
+    if q and q.strip():
+        where.append("l.label LIKE ? ESCAPE '\\'")
+        params.append("%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+    if date_from:
+        where.append("date(l.ts) >= date(?)")
+        params.append(date_from)
+    if date_to:
+        where.append("date(l.ts) <= date(?)")
+        params.append(date_to)
+    return " AND ".join(where), params
+
+
+def _can_undo(log: dict) -> bool:
+    if log["reverted_by"] or not log["has_snapshot"]:
+        return False
+    return log["action"] == "update" or log["entity"] in UNDO_STRUCTURAL
+
+
+def _history_page(conn, where: str, params: list, limit: int, offset: int) -> dict:
+    total = conn.execute(f"SELECT COUNT(*) FROM audit_log l WHERE {where}", params).fetchone()[0]
+    logs = rows(conn, "SELECT l.id, l.ts, l.action, l.entity, l.entity_id, l.detail, l.label AS name, l.reverted_by,"
+                       " l.snapshot IS NOT NULL AS has_snapshot, u.full_name AS user_name, u.username, l.user_id"
+                       " FROM audit_log l LEFT JOIN users u ON u.id = l.user_id"
+                       f" WHERE {where} ORDER BY l.id DESC LIMIT ? OFFSET ?", (*params, limit, max(0, offset)))
+    ref_ids = {"units": set(), "employees": set()}
+    for log in logs:
+        detail = log.pop("detail")
+        try:
+            changes = json.loads(detail) if detail and detail.startswith("{") else None
+        except ValueError:
+            changes = None
+        if changes is not None:  # bản ghi cũ có thể chứa trường "đổi" từ 22 sang '22': bỏ đi cho gọn
+            changes = {k: v for k, v in changes.items() if v[0] == HISTORY_MASK or not _same(v[0], v[1])}
+            for k, (old, new) in changes.items():
+                bucket = "units" if k in ("unit_id", "parent_id") else "employees" if k == "employee_id" else None
+                if bucket:
+                    ref_ids[bucket].update(int(x) for x in (old, new) if str(x).isdigit())
+        log["changes"] = changes
+        log["note"] = None if changes is not None else detail
+        log["can_undo"] = _can_undo(log)
+        log["undone"] = bool(log["reverted_by"])
+        log.pop("has_snapshot")
+        log.pop("reverted_by")
+    refs = {}
+    for bucket, col in (("units", "name"), ("employees", "full_name")):
+        ids = sorted(ref_ids[bucket])
+        refs[bucket] = {r["id"]: r["n"] for r in rows(conn, f"SELECT id, {col} AS n FROM {bucket}"
+                                                           f" WHERE id IN ({','.join('?' * len(ids))})", ids)} if ids else {}
+    return {"items": logs, "total": total, "refs": refs, "fields": FIELD_LABELS}
+
+
+@app.get("/api/change-history")
+def change_history(request: Request, limit: int = 200, entity: str | None = None):
+    """Ai đã sửa/thêm/xoá gì trong sơ đồ, nhân sự, quy trình, mục tiêu; sửa từ giá trị nào sang giá trị nào (Ban TGĐ / quản trị)."""
+    auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    where, params = _history_filter(entity, None, None, None, None, None)
+    with connect() as conn:
+        return _history_page(conn, where, params, max(1, min(limit, 1000)), 0)["items"]
+
+
+@app.get("/api/change-history/page")
+def change_history_page(request: Request, limit: int = 50, offset: int = 0, entity: str | None = None, action: str | None = None,
+                        user_id: int | None = None, q: str | None = None, date_from: str | None = None, date_to: str | None = None):
+    """Như /api/change-history nhưng có lọc (loại, thao tác, người, ngày, tên), phân trang và tổng số dòng."""
+    auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    where, params = _history_filter(entity, action, user_id, q, date_from, date_to)
+    with connect() as conn:
+        out = _history_page(conn, where, params, max(1, min(limit, 200)), offset)
+        out["users"] = rows(conn, "SELECT DISTINCT u.id, COALESCE(u.full_name, u.username) AS name FROM audit_log l"
+                                  " JOIN users u ON u.id = l.user_id WHERE l.action IN ('create','update','delete')"
+                                  f" AND l.entity IN ({','.join('?' * len(WRITABLE))}) ORDER BY name", list(WRITABLE))
+    return out
+
+
+@app.get("/api/change-history/export")
+def change_history_export(request: Request, entity: str | None = None, action: str | None = None, user_id: int | None = None,
+                          q: str | None = None, date_from: str | None = None, date_to: str | None = None):
+    """File Excel của lịch sử theo đúng bộ lọc đang chọn, tối đa 20.000 dòng."""
+    auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    where, params = _history_filter(entity, action, user_id, q, date_from, date_to)
+    with connect() as conn:
+        page = _history_page(conn, where, params, 20000, 0)
+    ACT = {"create": "Thêm mới", "update": "Sửa", "delete": "Xoá"}
+    TBL = {"units": "Đơn vị", "employees": "Nhân sự", "positions": "Chức danh", "processes": "Quy trình", "targets": "Mục tiêu"}
+
+    def show(field, v):
+        if v is None or v == "":
+            return "—"
+        if field in ("unit_id", "parent_id") and str(v).isdigit():
+            return page["refs"]["units"].get(int(v), f"#{v}")
+        if field == "employee_id" and str(v).isdigit():
+            return page["refs"]["employees"].get(int(v), f"#{v}")
+        return str(v)
+
+    lines = []
+    for l in page["items"]:
+        diff = "; ".join(f"{FIELD_LABELS.get(k, k)}: {show(k, a)} → {show(k, b)}" for k, (a, b) in (l["changes"] or {}).items())
+        lines.append([l["ts"], l["user_name"] or l["username"] or "", ACT.get(l["action"], l["action"]), TBL.get(l["entity"], l["entity"]),
+                      l["name"] or f"#{l['entity_id']}", diff or (l["note"] or ""), "có" if l["undone"] else ""])
+    name = f"AZB_lich_su_thay_doi_{time.strftime('%Y%m%d_%H%M')}.xlsx"
+    return Response(export.history_xlsx(lines), media_type=export.MIME["xlsx"],
+                    headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "private, no-store",
+                             "X-Content-Type-Options": "nosniff"})
+
+
+class HistoryCleanup(BaseModel):
+    snapshot_days: int = auditlog.DEFAULT_SNAPSHOT_DAYS
+    archive_days: int = auditlog.DEFAULT_ARCHIVE_DAYS
+
+
+@app.get("/api/change-history/cleanup-preview")
+def change_history_cleanup_preview(request: Request, snapshot_days: int = auditlog.DEFAULT_SNAPSHOT_DAYS,
+                                   archive_days: int = auditlog.DEFAULT_ARCHIVE_DAYS):
+    """Xem trước việc dọn nhật ký: bao nhiêu ảnh chụp hoàn tác và dòng cũ sẽ bị ảnh hưởng (chỉ quản trị)."""
+    auth.require_roles(request, {"admin"})
+    try:
+        with connect() as conn:
+            return auditlog.preview(conn, snapshot_days, archive_days)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/change-history/cleanup")
+def change_history_cleanup(body: HistoryCleanup, request: Request):
+    """Dọn nhật ký theo tầng: bỏ ảnh chụp hoàn tác quá hạn; dòng quá hạn lưu trữ ra Excel rồi mới xoá (chỉ quản trị)."""
+    user = auth.require_roles(request, {"admin"})
+    try:
+        return auditlog.cleanup(body.snapshot_days, body.archive_days, user["id"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/change-history/{log_id}/undo")
+def change_history_undo(log_id: int, request: Request):
+    """Hoàn tác một thay đổi (sửa → trả giá trị cũ; thêm → xoá; xoá → khôi phục). Việc hoàn tác được ghi thành một dòng mới."""
+    import sqlite3
+    user = auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    with connect() as conn:
+        log = row(conn, "SELECT * FROM audit_log WHERE id = ?", (log_id,))
+        if not log or log["action"] not in ("create", "update", "delete") or log["entity"] not in WRITABLE:
+            raise HTTPException(404, "Không tìm thấy thay đổi")
+        table, item_id = log["entity"], log["entity_id"]
+        if log["reverted_by"]:
+            raise HTTPException(409, "Thay đổi này đã được hoàn tác")
+        if not log["snapshot"] or not (log["action"] == "update" or table in UNDO_STRUCTURAL):
+            raise HTTPException(400, "Thay đổi này không hoàn tác được")
+        snap = json.loads(log["snapshot"])
+        current = row(conn, f"SELECT * FROM {table} WHERE id = ?", (item_id,))
+        label = log["label"]
+        try:
+            if log["action"] == "update":
+                if not current:
+                    raise HTTPException(409, "Đối tượng không còn tồn tại")
+                if any(not _same(current.get(k), v) for k, v in snap["new"].items()):
+                    raise HTTPException(409, "Dữ liệu đã được sửa tiếp sau thay đổi này nên không thể hoàn tác an toàn")
+                _check_write(conn, user, table, current, snap["old"])
+                sets = ", ".join(f"{k} = ?" for k in snap["old"])
+                if table in TOUCH_UPDATED:
+                    sets += ", updated_at = datetime('now','localtime')"
+                conn.execute(f"UPDATE {table} SET {sets} WHERE id = ?", (*snap["old"].values(), item_id))
+                new_id = _log(conn, user, "update", table, item_id, _change_detail(current, snap["old"]),
+                              label=_entity_label(conn, table, item_id), snapshot={"old": {k: current.get(k) for k in snap["old"]}, "new": snap["old"]})
+            elif log["action"] == "create":
+                if not current:
+                    raise HTTPException(409, "Đối tượng không còn tồn tại")
+                _check_write(conn, user, table, current, {})
+                conn.execute(f"DELETE FROM {table} WHERE id = ?", (item_id,))
+                new_id = _log(conn, user, "delete", table, item_id, label=label, snapshot=current)
+            else:  # delete → khôi phục đúng dòng cũ (giữ nguyên mã số)
+                if current:
+                    raise HTTPException(409, "Đối tượng đã tồn tại")
+                columns = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                data = {k: v for k, v in snap.items() if k in columns}
+                _check_write(conn, user, table, None, data)
+                conn.execute(f"INSERT INTO {table} ({', '.join(data)}) VALUES ({', '.join('?' * len(data))})", tuple(data.values()))
+                new_id = _log(conn, user, "create", table, item_id, label=_entity_label(conn, table, item_id) or label, snapshot=data)
+        except sqlite3.IntegrityError as e:
+            raise HTTPException(409, f"Không hoàn tác được vì dữ liệu liên quan đã thay đổi ({e})")
+        conn.execute("UPDATE audit_log SET reverted_by = ? WHERE id = ?", (new_id, log_id))
+    return {"ok": True, "log_id": new_id}
+
+
+@app.get("/api/targets/progress")
+def targets_progress(request: Request, period: str | None = None):
+    """Tiến độ mục tiêu một kỳ (mặc định kỳ mới nhất). Chỉ gồm mục tiêu người xem được phép thấy."""
+    return analytics.target_progress(list_targets(request), period)
+
+
+@app.get("/api/targets/export")
+def targets_export(request: Request, period: str | None = None):
+    """File Excel tiến độ mục tiêu một kỳ, cùng phạm vi quyền xem với trang Mục tiêu doanh thu."""
+    data = analytics.target_progress(list_targets(request), period)
+    name = f"AZB_muc_tieu_{export._slug(data['period'] or 'trong')}.xlsx"
+    return Response(export.targets_xlsx(data), media_type=export.MIME["xlsx"],
+                    headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "private, no-store",
+                             "X-Content-Type-Options": "nosniff"})
+
+
 # ---------- CRUD chung (có kiểm tra quyền) ----------
 def _clean(table: str, data: dict) -> dict:
     allowed = WRITABLE[table]
@@ -738,8 +1033,50 @@ def _create(request: Request, table: str, data: dict) -> dict:
             cur = conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({marks})", tuple(data.values()))
         except Exception as e:  # ràng buộc NOT NULL / UNIQUE
             raise HTTPException(400, str(e))
-        _log(conn, user, "create", table, cur.lastrowid)
-        return row(conn, f"SELECT * FROM {table} WHERE id = ?", (cur.lastrowid,))
+        created = row(conn, f"SELECT * FROM {table} WHERE id = ?", (cur.lastrowid,))
+        _log(conn, user, "create", table, cur.lastrowid, label=_entity_label(conn, table, cur.lastrowid), snapshot=created)
+        return created
+
+
+# Trường thông tin cá nhân: lịch sử chỉ ghi TÊN trường đã đổi, không ghi giá trị cũ/mới
+SENSITIVE_FIELDS = {"birth_date", "email", "phone", "contract_term", "notes", "employee_code"}
+
+
+def _same(a, b) -> bool:
+    """Hai giá trị coi như nhau: '' = rỗng, 22 = '22', 5 = 5.0 (form gửi chuỗi, DB lưu số)."""
+    if a in (None, "") and b in (None, ""):
+        return True
+    if a == b:
+        return True
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return str(a) == str(b)
+
+
+def _changed_fields(before: dict, after: dict) -> dict:
+    return {k: new for k, new in after.items() if not _same(before.get(k), new)}
+
+
+def _change_detail(before: dict, after: dict) -> str | None:
+    """Chuỗi JSON {trường: [cũ, mới]} cho các trường thực sự đổi; None nếu không đổi gì."""
+    changes = {k: ["(đã ẩn)", "(đã ẩn)"] if k in SENSITIVE_FIELDS else [before.get(k), new]
+               for k, new in _changed_fields(before, after).items()}
+    return json.dumps(changes, ensure_ascii=False, default=str) if changes else None
+
+
+def _entity_label(conn, table: str, item_id) -> str | None:
+    col = HISTORY_NAME_COL.get(table)
+    r = row(conn, f"SELECT {col} AS n FROM {table} WHERE id = ?", (item_id,)) if col and item_id is not None else None
+    return r["n"] if r else None
+
+
+def _backfill_history_labels(conn) -> None:
+    """Bản ghi cũ chưa có tên: điền tên hiện tại của đối tượng nếu nó còn tồn tại."""
+    for table in WRITABLE:
+        col = HISTORY_NAME_COL[table]
+        conn.execute(f"UPDATE audit_log SET label = (SELECT {col} FROM {table} t WHERE t.id = audit_log.entity_id)"
+                     " WHERE label IS NULL AND entity = ? AND entity_id IS NOT NULL", (table,))
 
 
 def _update(request: Request, table: str, item_id: int, data: dict) -> dict:
@@ -761,7 +1098,10 @@ def _update(request: Request, table: str, item_id: int, data: dict) -> dict:
             conn.execute(f"UPDATE {table} SET {sets} WHERE id = ?", (*data.values(), item_id))
         except Exception as e:
             raise HTTPException(400, str(e))
-        _log(conn, user, "update", table, item_id)
+        changed = _changed_fields(existing, data)
+        if changed:  # không đổi gì thì không ghi lịch sử
+            _log(conn, user, "update", table, item_id, _change_detail(existing, data), label=_entity_label(conn, table, item_id),
+                 snapshot={"old": {k: existing.get(k) for k in changed}, "new": changed})
         return row(conn, f"SELECT * FROM {table} WHERE id = ?", (item_id,))
 
 
@@ -774,8 +1114,9 @@ def _delete(request: Request, table: str, item_id: int) -> dict:
         if table == "units" and user["role"] not in auth.EDIT_ALL_ROLES:
             raise HTTPException(403, "Chỉ Ban TGĐ / quản trị được xoá đơn vị")
         _check_write(conn, user, table, existing, {})
+        label = _entity_label(conn, table, item_id)
         conn.execute(f"DELETE FROM {table} WHERE id = ?", (item_id,))
-        _log(conn, user, "delete", table, item_id)
+        _log(conn, user, "delete", table, item_id, label=label, snapshot=existing)
     return {"ok": True}
 
 
@@ -1425,6 +1766,46 @@ def delete_conversation(conv_id: int, request: Request, delete_files: bool = Fal
 @app.post("/api/chat")
 def chat(req: ChatRequest, request: Request, background: BackgroundTasks):
     user = auth.require_roles(request, auth.AI_ROLES)
+    return _run_chat(req, user, background)
+
+
+@app.post("/api/chat/stream")
+def chat_stream(req: ChatRequest, request: Request):
+    """Như /api/chat nhưng trả theo luồng SSE: mỗi công cụ AI gọi được báo ngay ("tool"), cuối cùng là "done" hoặc "error".
+    Giữ cách trả lời cuối nguyên vẹn; chỉ thêm tiến trình để người hỏi không phải nhìn khung chờ suốt 1–2 phút."""
+    user = auth.require_roles(request, auth.AI_ROLES)
+    events: queue.Queue = queue.Queue()
+    background = BackgroundTasks()  # tác vụ nền (trích bộ nhớ) chạy sau khi luồng kết thúc
+
+    def worker() -> None:
+        try:
+            out = _run_chat(req, user, background, progress=lambda tool: events.put(("tool", tool)))
+            events.put(("done", out))
+        except HTTPException as e:
+            events.put(("error", e.detail if isinstance(e.detail, str) else "Yêu cầu không hợp lệ"))
+        except Exception:
+            events.put(("error", "Lỗi máy chủ khi trả lời, hãy thử lại."))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def stream():
+        while True:
+            kind, data = events.get()
+            if kind == "tool":
+                payload = {"type": "tool", "tool": data}
+            elif kind == "done":
+                payload = {"type": "done", **data}
+            else:
+                payload = {"type": "error", "detail": data}
+            yield f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+            if kind != "tool":
+                return
+
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=headers, background=background)
+
+
+def _run_chat(req: ChatRequest, user: dict, background: BackgroundTasks, progress=None) -> dict:
     # SĐT/email trong câu hỏi không được gửi cho nhà cung cấp AI hay lưu vào lịch sử
     content = contacts.scrub(req.content.strip())
     if not content:
@@ -1446,7 +1827,7 @@ def chat(req: ChatRequest, request: Request, background: BackgroundTasks):
         ai_content += "\n\n[Hệ thống: " + " ".join(notes) + " Hãy báo người dùng điều này, đừng đoán nội dung file.]"
     with connect() as conn:
         mem = memory.context(conn, user["id"])  # '' nếu người dùng chưa bật bộ nhớ cá nhân
-    res = ai.answer(history + [{"role": "user", "content": ai_content}], user, memory=mem)
+    res = ai.answer(history + [{"role": "user", "content": ai_content}], user, audit=ai.new_audit(progress), memory=mem)
     trail = res.pop("audit", {"flags": [], "docs_read": []})
     with connect() as conn:  # nhật ký mọi câu hỏi AI (kể cả lượt lỗi): ai hỏi gì, AI đọc tài liệu nào, có nội dung đáng ngờ không
         conn.execute(

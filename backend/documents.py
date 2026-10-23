@@ -590,7 +590,8 @@ def search_docs(conn: sqlite3.Connection, q: str, limit: int = 30, unit_id: int 
     if unit_id:
         sql += " WHERE d.unit_id = ?"
         params.append(unit_id)
-    by_name, by_content, seen = [], [], set()
+    by_name, by_content, by_related, seen = [], [], [], set()
+    concepts = _concepts(q)  # khi quên tên file: tên khớp theo cách gọi tương đương ("sơ đồ tổ chức" ~ "sơ đồ điều hành")
     for d in rows(conn, sql + " ORDER BY d.uploaded_at DESC", params):
         content = d.pop("content", None) or ""
         if allowed_ids is not None and d["id"] not in allowed_ids:
@@ -605,6 +606,15 @@ def search_docs(conn: sqlite3.Connection, q: str, limit: int = 30, unit_id: int 
         name_ok = _matches(terms, n_fold, n_raw)
         in_name = all(name_ok)
         in_content = False
+        if not in_name and concepts:
+            padded = _title_padded(d)
+            lv = [_level(c, padded) for c in concepts]
+            if sum(1 for x in lv if x) * 2 >= len(concepts) and any(lv):
+                seen.add(key)
+                d["in_name"] = True
+                d["_content"] = ""
+                by_related.append((-sum(lv) / len(concepts), d))
+                continue
         if not in_name and content:
             ck = (d["id"], len(content), d["uploaded_at"])
             if ck not in _WORDSET_CACHE:  # chuẩn hoá cả nội dung rất tốn: làm 1 lần, các lần gõ sau dùng lại
@@ -616,7 +626,8 @@ def search_docs(conn: sqlite3.Connection, q: str, limit: int = 30, unit_id: int 
             d["in_name"] = in_name
             d["_content"] = "" if in_name else content
             (by_name if in_name else by_content).append(d)
-    out = (by_name + by_content)[:limit]
+    by_related.sort(key=lambda t: t[0])
+    out = (by_name + [d for _, d in by_related] + by_content)[:limit]
     for d in out:  # đoạn trích chỉ làm cho các kết quả được hiển thị
         c = d.pop("_content")
         d["snippet"] = _make_snippet(c, terms) if c else ""
@@ -673,6 +684,7 @@ SYNONYM_GROUPS = [
     "bao cao|report",
     "phe duyet|duyet|ky duyet|approve",
     "ho so nang luc|hsnl|profile",
+    "so do to chuc|so do dieu hanh|so do|co cau to chuc|bo may to chuc|org chart|orgchart",
 ]
 _SYN_INDEX: dict[tuple, list[tuple]] = {}
 for _g in SYNONYM_GROUPS:
@@ -773,6 +785,38 @@ def sync_ai_index(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _semantic_extra(conn: sqlite3.Connection, q: str, unit_id: int | None, docs: dict, have: set[int], k: int) -> list[dict]:
+    """Tài liệu có đoạn gần nghĩa với câu hỏi (xem backend/semantic.py), chưa có trong kết quả từ khoá.
+    `docs` đã lọc theo quyền người hỏi nên không bao giờ trả tài liệu ngoài quyền. Lỗi (mạng, khoá) thì bỏ qua."""
+    if k <= 0:
+        return []
+    from . import semantic
+    try:
+        hits = semantic.search(conn, q, allowed_ids=set(docs), k=k + len(have))
+    except Exception:  # tìm theo ý nghĩa lỗi không được làm hỏng kết quả từ khoá
+        return []
+    out = []
+    for score, doc_id, src, chunk_no, page in hits:
+        if doc_id in have or doc_id not in docs:
+            continue
+        d = docs[doc_id]
+        if unit_id and d["unit_id"] not in (unit_id, None):
+            continue
+        item = {"doc_id": d["id"], "title": d["title"], "doc_type": DOC_TYPES.get(d["doc_type"], d["doc_type"]),
+                "unit_name": ("Tài liệu riêng của người đang hỏi (đính kèm chat)" if d["access_level"] == "private"
+                              else d["unit_name"] or "Toàn công ty / chưa gắn đơn vị"),
+                "match": f"{round(score * 100)}%", "matched_in": "nội dung (theo ý nghĩa)"}
+        if d["version"]:
+            item["version"] = d["version"]
+        if d["extract_status"] != "ok":
+            item["status"] = "chưa đọc được nội dung (chỉ khớp theo tên)"
+        item["_chunks"] = [(score, 0, chunk_no, page, src, [])]
+        out.append(item)
+        if len(out) >= k:
+            break
+    return out
+
+
 def ai_search(conn: sqlite3.Connection, q: str, unit_id: int | None = None, limit: int = 8,
               allowed_ids: set[int] | None = None) -> dict:
     """Tìm tài liệu cho trợ lý AI: khớp cả tiêu đề / mã / tên file lẫn nội dung, không phân biệt dấu, mở rộng theo
@@ -868,6 +912,8 @@ def ai_search(conn: sqlite3.Connection, q: str, unit_id: int | None = None, limi
         results = run(None)
         if results:
             note = "Không có tài liệu khớp trong đơn vị đã chọn; kết quả dưới đây thuộc các đơn vị khác."
+    if len(results) < limit:  # từ khoá chưa đủ: bổ sung tài liệu gần nghĩa (nếu đã bật tìm theo ý nghĩa)
+        results += _semantic_extra(conn, q, unit_id, docs, {r["doc_id"] for r in results}, limit - len(results))
     # đoạn trích quanh ý hiếm nhất đã khớp, lấy từ văn bản gốc (còn dấu)
     srcs = {src for it in results for *_, src, _ in it["_chunks"]}
     originals = {}

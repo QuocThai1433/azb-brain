@@ -264,10 +264,46 @@ CREATE TABLE IF NOT EXISTS ocr_usage (
     n       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, day)
 );
+
+-- Vector ngữ nghĩa của từng đoạn tài liệu (xem backend/semantic.py). src = rowid trong doc_chunks, vec = JSON đã chuẩn hoá
+CREATE TABLE IF NOT EXISTS doc_vectors (
+    src      INTEGER PRIMARY KEY,
+    doc_id   INTEGER NOT NULL,
+    chunk_no INTEGER,
+    page     INTEGER,
+    vec      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_doc_vectors_doc ON doc_vectors (doc_id);
+-- Dấu nội dung mà vector của tài liệu đó được tạo từ (đổi nội dung thì tạo lại)
+CREATE TABLE IF NOT EXISTS doc_vector_meta (
+    doc_id INTEGER PRIMARY KEY,
+    stamp  TEXT NOT NULL
+);
+
+-- Đề xuất cải tiến (lưu từ câu trả lời của trợ lý AI hoặc nhập tay) và tiến trình xử lý
+CREATE TABLE IF NOT EXISTS proposals (
+    id          INTEGER PRIMARY KEY,
+    title       TEXT NOT NULL,
+    body        TEXT,
+    status      TEXT NOT NULL DEFAULT 'new',  -- new | approved | in_progress | done | dropped
+    owner       TEXT,                         -- người/bộ phận phụ trách thực hiện
+    note        TEXT,                         -- ghi chú của Ban TGĐ
+    created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
 """
 
 MIGRATIONS = [
     "ALTER TABLE audit_log ADD COLUMN user_id INTEGER",
+    # Lịch sử thay đổi: tên đối tượng tại lúc ghi (đối tượng đã xoá vẫn có tên), ảnh chụp để hoàn tác, bản ghi hoàn tác nó
+    "ALTER TABLE audit_log ADD COLUMN label TEXT",
+    "ALTER TABLE audit_log ADD COLUMN snapshot TEXT",
+    "ALTER TABLE audit_log ADD COLUMN reverted_by INTEGER",
+    # Chỉ mục cho trang Lịch sử (lọc theo ngày, người, loại) để nhật ký dài ra vẫn nhanh
+    "CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id)",
     "ALTER TABLE employees ADD COLUMN employee_code TEXT",
     # Thông tin từ danh sách nhân sự HCNS (xem backend/hr_import.py)
     "ALTER TABLE employees ADD COLUMN job_title TEXT",       # chức danh theo HCNS

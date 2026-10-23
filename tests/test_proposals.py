@@ -1,0 +1,71 @@
+"""Đề xuất cải tiến: người tạo chỉ thấy đề xuất của mình; Ban TGĐ/quản trị xem tất cả và đổi tiến trình; viewer không dùng được."""
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from fastapi.testclient import TestClient
+
+from backend import app as app_module, auth, db
+
+
+class ProposalsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.patch = mock.patch.object(db, "DB_PATH", Path(self.tmp.name) / "azb.db")
+        self.patch.start()
+        db.init_db()
+        self.clients = {}
+        with db.connect() as c:
+            for uid, name, role in ((1, "ceo", "ceo"), (2, "manager", "manager"), (3, "manager2", "manager"), (4, "viewer", "viewer")):
+                c.execute("INSERT INTO users (id, username, role, password_hash) VALUES (?,?,?,'x')", (uid, name, role))
+                cl = TestClient(app_module.app)
+                cl.cookies.set(auth.SESSION_COOKIE, auth.create_session(c, uid))
+                self.clients[name] = cl
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def test_create_starts_as_new(self):
+        r = self.clients["manager"].post("/api/proposals", json={"title": "Gộp hai kho hồ sơ", "body": "Chi tiết"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual((r.json()["status"], r.json()["title"]), ("new", "Gộp hai kho hồ sơ"))
+
+    def test_manager_sees_only_own(self):
+        self.clients["manager"].post("/api/proposals", json={"title": "Của A"})
+        self.clients["manager2"].post("/api/proposals", json={"title": "Của B"})
+        mine = self.clients["manager"].get("/api/proposals").json()
+        self.assertEqual([p["title"] for p in mine], ["Của A"])
+        self.assertEqual(len(self.clients["ceo"].get("/api/proposals").json()), 2)
+
+    def test_viewer_is_refused(self):
+        self.assertEqual(self.clients["viewer"].get("/api/proposals").status_code, 403)
+        self.assertEqual(self.clients["viewer"].post("/api/proposals", json={"title": "x"}).status_code, 403)
+
+    def test_only_ceo_changes_status_and_owner(self):
+        pid = self.clients["manager"].post("/api/proposals", json={"title": "x"}).json()["id"]
+        self.assertEqual(self.clients["manager"].put(f"/api/proposals/{pid}", json={"status": "approved"}).status_code, 403)
+        r = self.clients["ceo"].put(f"/api/proposals/{pid}", json={"status": "in_progress", "owner": "P. HCNS", "note": "Giao HCNS làm"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual((r.json()["status"], r.json()["owner"], r.json()["note"]), ("in_progress", "P. HCNS", "Giao HCNS làm"))
+
+    def test_invalid_status_and_empty_title_are_refused(self):
+        pid = self.clients["manager"].post("/api/proposals", json={"title": "x"}).json()["id"]
+        self.assertEqual(self.clients["ceo"].put(f"/api/proposals/{pid}", json={"status": "xoa_het"}).status_code, 400)
+        self.assertEqual(self.clients["manager"].post("/api/proposals", json={"title": "   "}).status_code, 400)
+
+    def test_filter_by_status(self):
+        ceo, m = self.clients["ceo"], self.clients["manager"]
+        pid = m.post("/api/proposals", json={"title": "a"}).json()["id"]
+        m.post("/api/proposals", json={"title": "b"})
+        ceo.put(f"/api/proposals/{pid}", json={"status": "done"})
+        done = ceo.get("/api/proposals?status=done").json()
+        self.assertEqual([p["title"] for p in done], ["a"])
+
+    def test_missing_proposal_is_404(self):
+        self.assertEqual(self.clients["ceo"].put("/api/proposals/999", json={"status": "done"}).status_code, 404)
+
+
+if __name__ == "__main__":
+    unittest.main()

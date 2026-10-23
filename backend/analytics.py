@@ -2,12 +2,14 @@
 import re
 import sqlite3
 import unicodedata
+from datetime import date
 
 from .db import row, rows
 
 # Loại tài liệu được coi là "đơn vị đã có quy trình / quy định" (bảng processes có cấu trúc đang ít dùng, quy trình thực tế
 # nằm trong kho tài liệu)
 INTERNAL_DOC_TYPES = "('quy_trinh', 'quy_dinh', 'ram', 'huong_dan', 'bieu_mau', 'so_tay')"
+REVIEW_DAYS = 365  # quy trình/tài liệu nội bộ cần rà soát sau 12 tháng
 
 POSITION_SQL = """
 SELECT p.id, p.unit_id, p.title, p.title_code, p.is_head, p.headcount, p.notes,
@@ -138,6 +140,40 @@ def insights(conn: sqlite3.Connection) -> dict:
         "units": rows(conn, "SELECT id, name, full_name, notes FROM units WHERE verified = 0 ORDER BY sort_order"),
         "employees": rows(conn, "SELECT id, full_name FROM employees WHERE verified = 0 ORDER BY full_name"),
     }
+    # Vòng đời: quy trình/tài liệu nội bộ quá REVIEW_DAYS ngày chưa rà soát (hoặc chưa ghi ngày hiệu lực)
+    review_cut = f"date('now', 'localtime', '-{REVIEW_DAYS} day')"
+    stale_processes = rows(
+        conn,
+        f"""SELECT p.id, p.code, p.name, p.effective_date, u.id AS unit_id, u.name AS unit_name FROM processes p
+           JOIN units u ON u.id = p.unit_id
+           WHERE p.status != 'retired' AND (p.effective_date IS NULL OR p.effective_date = ''
+                 OR date(p.effective_date) IS NULL OR date(p.effective_date) < {review_cut})
+           ORDER BY u.sort_order, p.code""",
+    )
+    stale_documents = rows(
+        conn,
+        f"""SELECT d.id, d.title, d.code, d.doc_type, d.uploaded_at, d.unit_id, u.name AS unit_name FROM documents d
+           LEFT JOIN units u ON u.id = d.unit_id
+           WHERE d.doc_type IN {INTERNAL_DOC_TYPES} AND date(d.uploaded_at) < {review_cut}
+           ORDER BY d.uploaded_at""",
+    )
+    # Biên chế: định biên trên sơ đồ (tổng headcount) so với số người đang gán trên sơ đồ và số nhân sự thực tế theo HCNS
+    staffing = rows(
+        conn,
+        """SELECT u.id AS unit_id, u.name AS unit_name, u.unit_type,
+                  (SELECT COALESCE(SUM(headcount), 0) FROM positions WHERE unit_id = u.id) AS planned,
+                  (SELECT COUNT(*) FROM positions WHERE unit_id = u.id AND employee_id IS NOT NULL) AS seated,
+                  (SELECT COUNT(*) FROM employees WHERE unit_id = u.id AND status != 'inactive') AS hcns_active
+           FROM units u WHERE u.unit_type IN ('division', 'department', 'committee') ORDER BY u.sort_order""",
+    )
+    for s in staffing:
+        s["open_on_chart"] = max(0, s["planned"] - s["seated"])
+        s["gap"] = s["hcns_active"] - s["planned"]  # âm = thiếu so với định biên, dương = dư
+    draft_processes = rows(
+        conn,
+        "SELECT p.id, p.code, p.name, u.id AS unit_id, u.name AS unit_name FROM processes p JOIN units u ON u.id = p.unit_id"
+        " WHERE p.status = 'draft' ORDER BY u.sort_order, p.code",
+    )
     stats = row(
         conn,
         """SELECT (SELECT COUNT(*) FROM units WHERE unit_type = 'division') AS divisions,
@@ -157,6 +193,10 @@ def insights(conn: sqlite3.Connection) -> dict:
         "units_without_process": missing_process,
         "units_without_target": missing_target,
         "unverified": unverified,
+        "stale_processes": stale_processes,
+        "stale_documents": stale_documents,
+        "draft_processes": draft_processes,
+        "staffing": staffing,
     }
 
 
@@ -286,3 +326,65 @@ def search(conn: sqlite3.Connection, q: str) -> dict:
         result["hint"] = ("Có nhiều đơn vị khớp ngang nhau (có thể là khối và phòng cùng tên, hoặc hai đơn vị khác nhau): chọn đơn vị đúng "
                           "với câu hỏi, gọi get_unit_detail để xác minh, và nêu rõ tên đơn vị đang trả lời.")
     return result
+
+
+# ---------- Tiến độ mục tiêu doanh thu ----------
+TARGET_WATCH_PCT = 70  # dưới mức này là "chậm" (đỏ); từ mức này đến 100% là "cần theo dõi" (vàng)
+TARGET_STATUS_ORDER = {"behind": 0, "watch": 1, "ok": 2, "no_data": 3}
+
+
+def period_elapsed(period: str | None, today: date | None = None) -> float | None:
+    """Tỷ lệ thời gian đã trôi qua của kỳ (0..1): '2026' (năm), '2026-Q4' (quý), '2026-10' (tháng). Kỳ lạ -> None."""
+    today = today or date.today()
+    m = re.fullmatch(r"(\d{4})(?:-(?:Q([1-4])|(0[1-9]|1[0-2])))?", (period or "").strip())
+    if not m:
+        return None
+    y, q, mo = int(m.group(1)), m.group(2), m.group(3)
+    if q:
+        a, b = (int(q) - 1) * 3 + 1, int(q) * 3 + 1
+    elif mo:
+        a, b = int(mo), int(mo) + 1
+    else:
+        a, b = 1, 13
+    start = date(y, a, 1)
+    end = date(y + 1, 1, 1) if b == 13 else date(y, b, 1)
+    return max(0.0, min(1.0, ((today - start).days + 1) / (end - start).days))
+
+
+FORECAST_MIN_ELAPSED = 0.1  # quá đầu kỳ thì ngoại suy không đáng tin
+
+
+def target_progress(targets: list[dict], period: str | None = None, today: date | None = None) -> dict:
+    """Tiến độ các mục tiêu của MỘT kỳ (mặc định kỳ mới nhất): % thực hiện, trạng thái, so với thời gian đã trôi qua,
+    dự báo cuối kỳ (theo tốc độ hiện tại) và lịch sử các kỳ của cùng đơn vị + chỉ tiêu.
+    `targets` là danh sách đã lọc theo quyền người xem (xem app.list_targets)."""
+    periods = sorted({t["period"] for t in targets if t.get("period")}, reverse=True)
+    chosen = period if period in periods else (periods[0] if periods else None)
+    elapsed = period_elapsed(chosen, today)
+
+    def pct_of(t):
+        target, actual = t.get("target_value"), t.get("actual_value")
+        return None if actual is None or not target else round(actual / target * 100, 1)
+
+    items = []
+    for t in targets:
+        if t.get("period") != chosen:
+            continue
+        pct = pct_of(t)
+        status = "no_data" if pct is None else "ok" if pct >= 100 else "watch" if pct >= TARGET_WATCH_PCT else "behind"
+        forecast_pct = None
+        if pct is not None and elapsed is not None and elapsed >= FORECAST_MIN_ELAPSED:
+            forecast_pct = round(pct / elapsed, 1)
+        history = sorted(
+            ({"period": h["period"], "target_value": h.get("target_value"), "actual_value": h.get("actual_value"), "pct": pct_of(h)}
+             for h in targets if h.get("unit_id") == t.get("unit_id") and h.get("metric") == t.get("metric")
+             and h.get("metric_name") == t.get("metric_name")),
+            key=lambda h: h["period"])
+        items.append({**t, "pct": pct, "status": status, "forecast_pct": forecast_pct,
+                      "forecast_value": round(t["target_value"] * forecast_pct / 100) if forecast_pct is not None else None,
+                      "history": history})
+    items.sort(key=lambda x: (TARGET_STATUS_ORDER[x["status"]], -(x["pct"] or 0), x.get("unit_name") or ""))
+    summary = {k: sum(1 for x in items if x["status"] == k) for k in TARGET_STATUS_ORDER}
+    summary["total"] = len(items)
+    return {"periods": periods, "period": chosen, "elapsed_pct": None if elapsed is None else round(elapsed * 100, 1),
+            "items": items, "summary": summary}
