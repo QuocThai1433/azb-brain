@@ -1,0 +1,7 @@
+.venv/
+data/
+data.rar
+_backup/
+.env
+__pycache__/
+*.db
