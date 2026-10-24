@@ -26,8 +26,11 @@ EDIT_ALL_ROLES = {"admin", "ceo"}
 FEATURES = {
     "import_hr": "Nhập file HCNS",
     "docs_view": "Xem tài liệu",
-    "docs_edit": "Sửa tài liệu (thêm/sửa/xoá)",
+    "docs_edit": "Sửa tài liệu (thêm/sửa)",
+    "docs_delete": "Xoá tài liệu",
+    "docs_download": "Tải file gốc tài liệu",
     "insights": "Xem Phân tích",
+    "ai_use": "Dùng trợ lý AI",
 }
 
 
@@ -75,14 +78,26 @@ def effective_permissions(conn: sqlite3.Connection, user: dict) -> list[str]:
     if user["role"] in EDIT_ALL_ROLES:
         return list(FEATURES)
     granted = {r[0] for r in conn.execute("SELECT feature FROM user_permissions WHERE user_id = ?", (user["id"],))}
-    if "docs_edit" in granted:
-        granted.add("docs_view")  # sửa được thì phải xem được
+    if granted & {"docs_edit", "docs_delete", "docs_download"}:
+        granted.add("docs_view")  # sửa/xoá/tải được thì phải xem được
     return [f for f in FEATURES if f in granted]
 
 
 def require_permission(request: Request, feature: str) -> dict:
     user = current_user(request)
     if feature not in user["permissions"]:
+        raise HTTPException(403, "Bạn không có quyền thực hiện thao tác này")
+    return user
+
+
+def can_use_ai(user: dict) -> bool:
+    """Vai trò admin/ceo/manager mặc định dùng được AI; vai trò khác cần được cấp quyền `ai_use`."""
+    return user["role"] in AI_ROLES or "ai_use" in user.get("permissions", [])
+
+
+def require_ai(request: Request) -> dict:
+    user = current_user(request)
+    if not can_use_ai(user):
         raise HTTPException(403, "Bạn không có quyền thực hiện thao tác này")
     return user
 

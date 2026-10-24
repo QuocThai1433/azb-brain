@@ -125,9 +125,9 @@ def main() -> None:
     import pymupdf
 
     rng = random.Random(a.seed)
+    from .documents import AI_READ_PDF_SQL
     with connect() as conn:
-        docs = rows(conn, "SELECT id, title, stored_path, page_count, content FROM documents "
-                          "WHERE extract_status = 'ok' AND extract_note LIKE '%AI%' AND lower(filename) LIKE '%.pdf' ORDER BY id")
+        docs = rows(conn, f"SELECT id, title, stored_path, page_count, content FROM documents WHERE {AI_READ_PDF_SQL} ORDER BY id")
     if a.docs:
         want = {int(x) for x in a.docs.split(",")}
         docs = [d for d in docs if d["id"] in want]

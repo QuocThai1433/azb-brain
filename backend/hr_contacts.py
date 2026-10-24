@@ -1,7 +1,8 @@
 """Bổ sung SĐT, ngày vào công ty, ngày sinh và loại hợp đồng cho nhân sự từ danh sách HCNS (sheet "DS nhân sự hiện tại").
 
 File HCNS chưa có cột mã nhân viên ở các sheet này, nên khớp theo họ tên (không phân biệt dấu):
-- Chỉ ghi khi tên trong file khớp đúng MỘT nhân viên đang hoạt động trong DB.
+- Chỉ ghi khi tên trong file khớp đúng MỘT nhân viên đang hoạt động trong DB. Nếu DB có nhiều người trùng tên,
+  chỉ ghi khi đúng một người khớp cả phòng ban lẫn chức danh trong file.
 - Trùng tên (trong file hoặc trong DB), không khớp, hoặc các sheet cho số/ngày khác nhau: báo cáo, KHÔNG ghi.
 - SĐT chuẩn hoá về dạng 0xxxxxxxxx (nhiều số nối bằng " / "). Ngày chuẩn hoá về YYYY-MM-DD;
   ô chỉ có năm (không đủ ngày) bị bỏ qua và báo cáo.
@@ -27,6 +28,10 @@ PRIMARY_SHEET = "DS nhân sự hiện tại"
 # các sheet cùng cấu trúc, chỉ dùng để đối chiếu
 CROSS_SHEETS = ["DS nhân sự theo SDTC mới", "file Chị Hân"]
 NAME_COL, BIRTH_COL, PHONE_COL, START_COL, CONTRACT_COL = 2, 5, 6, 7, 8  # C họ tên, F ngày sinh, G số liên lạc, H bắt đầu nhận việc, I hợp đồng (chỉ số 0)
+TITLE_COL, DEPT_COL = 3, 4  # D chức danh, E phòng ban: dùng để phân biệt người trùng tên trong DB
+# Từ chung chung bỏ đi khi so phòng ban / chức danh, chỉ giữ từ mang nghĩa riêng
+GENERIC_WORDS = {"phong", "ban", "bp", "bo", "phan", "ct", "cong", "trinh", "khoi", "nv", "nhan", "vien", "truong", "pho", "tbp",
+                 "tp", "pp", "kiem", "va", "cua", "nhom"}
 
 
 def _one_phone(piece: str) -> str | None:
@@ -63,6 +68,24 @@ def normalize_date(raw) -> str | None:
         return None
 
 
+def _keywords(text) -> set[str]:
+    return {w for w in re.split(r"[^a-z0-9]+", _fold(str(text or ""))) if w and w not in GENERIC_WORDS}
+
+
+def pick_by_dept_and_title(entry: dict, candidates: list[dict]) -> dict | None:
+    """Trùng tên trong DB: chọn người có phòng ban khớp (từ khoá của bên này nằm trọn trong bên kia) VÀ chức danh có chung từ khoá.
+    Chỉ trả về khi đúng MỘT người thoả cả hai; mơ hồ hoặc không ai thoả thì None (không ghi)."""
+    dept, title = _keywords(entry["dept_raw"]), _keywords(entry["title_raw"])
+    if not dept or not title:
+        return None
+    hits = []
+    for c in candidates:
+        c_dept = _keywords(c["hr_department"])
+        if c_dept and (dept <= c_dept or c_dept <= dept) and title & _keywords(c["job_title"]):
+            hits.append(c)
+    return hits[0] if len(hits) == 1 else None
+
+
 def read_sheet(wb, name: str) -> dict[str, list[dict]]:
     """Trả về {tên đã chuẩn hoá: [{name, phone_raw, start_raw, row}]} cho các dòng có STT là số (người thật)."""
     out: dict[str, list[dict]] = defaultdict(list)
@@ -76,7 +99,8 @@ def read_sheet(wb, name: str) -> dict[str, list[dict]]:
             continue
         clean = re.sub(r"\s+", " ", person).strip()
         out[_fold(clean)].append({"name": clean, "phone_raw": r[PHONE_COL], "start_raw": r[START_COL], "birth_raw": r[BIRTH_COL],
-                                  "contract_raw": r[CONTRACT_COL] if len(r) > CONTRACT_COL else None, "row": i})
+                                  "contract_raw": r[CONTRACT_COL] if len(r) > CONTRACT_COL else None,
+                                  "title_raw": r[TITLE_COL], "dept_raw": r[DEPT_COL], "row": i})
     return out
 
 
@@ -86,14 +110,14 @@ def plan(path: str) -> dict:
     cross = {s: read_sheet(wb, s) for s in CROSS_SHEETS}
 
     with connect() as conn:
-        emps = rows(conn, "SELECT id, full_name, phone, joined_date, birth_date, contract_term FROM employees WHERE status = 'active'")
+        emps = rows(conn, "SELECT id, full_name, phone, joined_date, birth_date, contract_term, job_title, hr_department FROM employees WHERE status = 'active'")
     by_name: dict[str, list[dict]] = defaultdict(list)
     for e in emps:
         by_name[_fold(e["full_name"])].append(e)
 
     res = {"sheet_people": sum(len(v) for v in primary.values()), "updates": [], "unchanged": 0,
            "ambiguous_file": [], "ambiguous_db": [], "not_in_db": [], "invalid_phone": [], "conflict": [],
-           "bad_date": [], "date_conflict": [], "no_phone_in_file": 0, "db_total": len(emps)}
+           "bad_date": [], "date_conflict": [], "resolved_by_dept": [], "no_phone_in_file": 0, "db_total": len(emps)}
     # Người chỉ có ở sheet đối chiếu (không có ở sheet chính) vẫn được lấy từ sheet đối chiếu đầu tiên có tên đó
     keys = list(primary) + [k for s in cross.values() for k in s if k not in primary]
     for key in dict.fromkeys(keys):
@@ -143,8 +167,12 @@ def plan(path: str) -> dict:
             res["not_in_db"].append(e["name"])
             continue
         if len(matches) > 1:
-            res["ambiguous_db"].append(e["name"])
-            continue
+            picked = pick_by_dept_and_title(e, matches)
+            if picked is None:
+                res["ambiguous_db"].append(e["name"])
+                continue
+            res["resolved_by_dept"].append(e["name"])
+            matches = [picked]
         db = matches[0]
         change = {}
         if phone and db["phone"] != phone:
@@ -185,7 +213,8 @@ def _print(res: dict) -> None:
     print(f"  Ngày sinh: {sum(1 for u in res['updates'] if 'birth_date' in u)} | loại hợp đồng: {sum(1 for u in res['updates'] if 'contract_term' in u)}")
     print(f"  Đã đúng sẵn: {res['unchanged']}")
     print(f"  Trùng tên trong file (bỏ qua): {len(res['ambiguous_file'])}")
-    print(f"  Trùng tên trong DB (bỏ qua): {len(res['ambiguous_db'])}")
+    print(f"  Trùng tên trong DB, ghép được theo phòng ban + chức danh: {len(res['resolved_by_dept'])}")
+    print(f"  Trùng tên trong DB, không chắc chắn (bỏ qua): {len(res['ambiguous_db'])}")
     print(f"  Không có trong DB (bỏ qua): {len(res['not_in_db'])}")
     print(f"  Không có SĐT và ngày trong file: {res['no_phone_in_file']}")
     print(f"  Số lỗi (bỏ qua): {len(res['invalid_phone'])} | Ngày không đủ (bỏ qua): {len(res['bad_date'])}")

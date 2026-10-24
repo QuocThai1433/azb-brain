@@ -5,3 +5,6 @@ _backup/
 .env
 __pycache__/
 *.db
+
+CLAUDE.local.md
+.claude/settings.local.json

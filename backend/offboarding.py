@@ -54,3 +54,26 @@ def purge(conn: sqlite3.Connection, user_id: int, confirm: str) -> dict:
     conn.execute("DELETE FROM ocr_usage WHERE user_id = ?", (user_id,))
     conn.execute("UPDATE users SET memory_on = 0, data_purged_at = datetime('now','localtime') WHERE id = ?", (user_id,))
     return {"files": len(file_ids), "notes": notes, "conversations": convs}
+
+
+def delete_account(conn: sqlite3.Connection, actor_id: int, user_id: int, confirm: str) -> dict:
+    """Xoá hẳn tài khoản: dữ liệu riêng bị xoá, dòng users bị xoá (phiên đăng nhập, quyền, yêu cầu liên kết... theo CASCADE).
+    Tài liệu thư viện chung giữ lại (owner_id về NULL). Nhật ký hệ thống không xoá. `confirm` phải là tên đăng nhập."""
+    u = row(conn, "SELECT id, username, role FROM users WHERE id = ?", (user_id,))
+    if not u:
+        raise HTTPException(404, "Không tìm thấy tài khoản")
+    if u["id"] == actor_id:
+        raise HTTPException(400, "Không thể xoá chính tài khoản của mình")
+    if (confirm or "").strip().lower() != u["username"].lower():
+        raise HTTPException(400, "Hãy gõ đúng tên đăng nhập để xác nhận xoá.")
+    if u["role"] == "admin" and conn.execute(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1 AND id != ?", (user_id,)).fetchone()[0] == 0:
+        raise HTTPException(400, "Không thể xoá quản trị viên đang hoạt động cuối cùng.")
+    file_ids = [r[0] for r in conn.execute("SELECT id FROM documents WHERE access_level = 'private' AND owner_id = ?", (user_id,))]
+    for doc_id in file_ids:
+        privatefiles.remove(conn, doc_id)
+    notes = conn.execute("DELETE FROM user_memories WHERE user_id = ?", (user_id,)).rowcount
+    convs = conn.execute("DELETE FROM conversations WHERE user_id = ?", (user_id,)).rowcount
+    conn.execute("DELETE FROM ocr_usage WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    return {"username": u["username"], "files": len(file_ids), "notes": notes, "conversations": convs}

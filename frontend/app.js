@@ -53,13 +53,61 @@ const ICONS = {
   right: '<path d="m9 6 6 6-6 6"/>',
 };
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
-const FEATURE_LABELS = { import_hr: "Nhập file HCNS", docs_view: "Xem tài liệu", docs_edit: "Sửa tài liệu (thêm/sửa/xoá)", insights: "Xem Phân tích" };
+const FEATURE_LABELS = { import_hr: "Nhập file HCNS", docs_view: "Xem tài liệu", docs_edit: "Sửa tài liệu (thêm/sửa)", docs_delete: "Xoá tài liệu", docs_download: "Tải file gốc tài liệu", insights: "Xem Phân tích", ai_use: "Dùng trợ lý AI" };
 const PERM_TEMPLATES = {
   none: ["Không cấp thêm", []],
-  docs: ["Xem tài liệu", ["docs_view"]],
-  hr: ["Nhân viên HCNS", ["import_hr", "docs_view"]],
-  lead: ["Trưởng phòng / quản lý", ["docs_view", "docs_edit", "insights"]],
+  docs: ["Xem tài liệu", ["docs_view", "docs_download"]],
+  hr: ["Nhân viên HCNS", ["import_hr", "docs_view", "docs_download"]],
+  lead: ["Trưởng phòng / quản lý", ["docs_view", "docs_download", "docs_edit", "docs_delete", "insights", "ai_use"]],
 };
+const PERM_GROUPS = [["Tài liệu", ["docs_view", "docs_edit", "docs_delete", "docs_download"]], ["Khác", ["import_hr", "insights", "ai_use"]]];
+const DOC_DEPENDENTS = ["docs_edit", "docs_delete", "docs_download"];  // cần xem được tài liệu mới dùng được
+const permFields = (on = []) => PERM_GROUPS.flatMap(([title, fs]) => [
+  { type: "info", group: true, label: title },
+  ...fs.map((f) => ({ name: f, label: FEATURE_LABELS[f], type: "check", compact: true, default: on.includes(f) })),
+]);
+const permValues = (granted) => Object.fromEntries(Object.keys(FEATURE_LABELS).map((f) =>
+  [f, granted.includes(f) || (f === "docs_view" && DOC_DEPENDENTS.some((g) => granted.includes(g)))]));
+const pickedFeatures = (d) => Object.keys(FEATURE_LABELS).filter((f) => d[f]);
+// Mẫu quyền tick nhanh; tick sửa/xoá/tải thì tự tick Xem, bỏ Xem thì bỏ các quyền phụ thuộc
+function bindPermForm() {
+  const form = $("#modal-form"), el = form.elements;
+  el._tpl.onchange = (e) => {
+    const on = PERM_TEMPLATES[e.target.value][1];
+    Object.keys(FEATURE_LABELS).forEach((f) => (el[f].checked = on.includes(f)));
+  };
+  form.onchange = (e) => {
+    if (!el.docs_view) return;
+    if (e.target.name === "docs_view" && !e.target.checked) {
+      DOC_DEPENDENTS.forEach((f) => (el[f].checked = false));
+      hideCheckNote(e.target.closest(".check"));
+    }
+    else if (DOC_DEPENDENTS.includes(e.target.name) && !e.target.checked && !DOC_DEPENDENTS.some((f) => el[f].checked)) hideCheckNote(el.docs_view.closest(".check"));
+    else if (DOC_DEPENDENTS.includes(e.target.name) && e.target.checked && !el.docs_view.checked) {
+      el.docs_view.checked = true;
+      flashCheck(el.docs_view.closest(".check"), "Tự bật: cần xem được tài liệu mới dùng được quyền này");
+    }
+  };
+}
+function hideCheckNote(row) {
+  clearTimeout(row._noteTimer);
+  row.classList.remove("auto");
+  row.querySelector(".check-note")?.remove();
+}
+// Nháy dòng quyền vừa được tự bật kèm chú thích ngắn, để người dùng hiểu vì sao nó được tick
+function flashCheck(row, hint) {
+  row.classList.remove("auto");
+  void row.offsetWidth;
+  row.classList.add("auto");
+  let note = row.querySelector(".check-note");
+  if (!note) row.insertAdjacentHTML("beforeend", `<em class="check-note"></em>`), (note = row.querySelector(".check-note"));
+  note.textContent = hint;
+  const arm = () => { clearTimeout(row._noteTimer); row._noteTimer = setTimeout(() => hideCheckNote(row), 2600); };
+  // Rê chuột vào thì giữ chú thích hiện, thả ra vài giây sau mới ẩn
+  row.onmouseenter = () => clearTimeout(row._noteTimer);
+  row.onmouseleave = () => { if (row.querySelector(".check-note")) arm(); };
+  if (row.matches(":hover")) clearTimeout(row._noteTimer); else arm();
+}
 const tplField = { name: "_tpl", label: "Mẫu quyền (chọn để tick nhanh)", type: "select", options: Object.entries(PERM_TEMPLATES).map(([k, [l]]) => [k, l]), default: "none" };
 const DOC_ACTIONS = `<span class="btn-group"><button class="ghost" id="url-doc">${icon("globe")}Học từ URL</button><button class="primary" id="up-doc">${icon("upload")}Tải tài liệu lên</button></span>`;
 const hydrateIcons = (root = document) => root.querySelectorAll("svg[data-icon]").forEach((s) => {
@@ -131,14 +179,15 @@ async function refreshPending() {
   try {
     const st = await api("/api/auth/state");
     const prev = state.user.profile_notices || 0;
-    Object.assign(state.user, { pending_requests: st.user?.pending_requests || 0, pending_links: st.user?.pending_links || 0, profile_notices: st.user?.profile_notices || 0 });
+    Object.assign(state.user, { pending_requests: st.user?.pending_requests || 0, pending_links: st.user?.pending_links || 0,
+      pending_accounts: st.user?.pending_accounts || 0, profile_notices: st.user?.profile_notices || 0 });
     setBadges(state.user);
     // có kết quả duyệt mới trong lúc đang dùng app: báo ngay thay vì đợi user tự mở trang
     if (state.user.profile_notices > prev && state.view !== "profile") toast("Quản trị viên vừa xử lý yêu cầu của bạn. Xem ở mục Hồ sơ của tôi.");
   } catch {}
 }
 function setBadges(u) {
-  for (const [id, n] of [["access-badge", u.pending_requests], ["users-badge", u.pending_links], ["profile-badge", u.profile_notices]]) {
+  for (const [id, n] of [["access-badge", u.pending_requests], ["users-badge", (u.pending_links || 0) + (u.pending_accounts || 0)], ["profile-badge", u.profile_notices]]) {
     const b = $("#" + id);
     b.textContent = n || "";
     b.hidden = !n;
@@ -154,7 +203,7 @@ async function boot() {
   document.body.classList.toggle("logged-out", !st.user);
   if (!st.user) return renderLogin(st.needs_setup);
   const u = st.user;
-  const show = { chat: u.can_use_ai, myfiles: u.can_use_ai, memory: u.can_use_ai, insights: can("insights"), users: u.role === "admin", access: u.role !== "ceo", docs: can("docs_view"), history: ["admin", "ceo"].includes(u.role), proposals: u.can_use_ai };
+  const show = { chat: u.can_use_ai, myfiles: u.can_use_ai, memory: u.can_use_ai, insights: can("insights"), users: ["admin", "ceo"].includes(u.role), access: u.role !== "ceo", docs: can("docs_view"), history: ["admin", "ceo"].includes(u.role), proposals: u.can_use_ai };
   document.querySelectorAll("#nav button").forEach((b) => (b.hidden = show[b.dataset.view] === false));
   document.querySelectorAll("#nav .nav-group").forEach((g) => {  // ẩn tiêu đề nhóm nếu không còn mục nào
     let n = g.nextElementSibling, any = false;
@@ -175,12 +224,22 @@ async function boot() {
     { name: "new_password", label: "Mật khẩu mới (tối thiểu 8 ký tự)", type: "password", required: true },
   ], {}, (d) => api("/api/auth/password", { method: "POST", body: d }).then(() => toast("Đã đổi mật khẩu")));
   if (show[state.view] === false) state.view = "overview";
-  go(state.view);
+  if (location.pathname !== "/" || location.hash) { const r = parsePath(); go(r.view, r.extra, true); }
+  else go(state.view);
 }
 
-function renderLogin(needsSetup) {
+function renderLogin(needsSetup, registering = false) {
   clearTimeout(pollTimer);
   $("#userbox").innerHTML = "";
+  const showRegister = !needsSetup && registering;
+  const title = needsSetup ? "Tạo tài khoản quản trị đầu tiên" : showRegister ? "Đăng ký tài khoản" : "Đăng nhập";
+  const lead = needsSetup
+    ? "Hệ thống chưa có tài khoản nào. Tài khoản này có toàn quyền và dùng để cấp tài khoản cho người khác."
+    : showRegister ? "Điền thông tin để gửi yêu cầu. Quản trị viên sẽ duyệt tài khoản trước khi bạn đăng nhập."
+    : "Chào mừng trở lại. Vui lòng đăng nhập để tiếp tục.";
+  const switchLink = needsSetup ? "" : showRegister
+    ? 'Đã có tài khoản? <button type="button" class="link" data-switch="login">Đăng nhập</button>'
+    : 'Chưa có tài khoản? <button type="button" class="link" data-switch="register">Đăng ký</button>';
   $("#main").innerHTML = `
     <div class="auth">
     <section class="auth-art">
@@ -192,22 +251,117 @@ function renderLogin(needsSetup) {
       <div class="auth-feats"><span>${icon("org")} Sơ đồ tổ chức</span><span>${icon("file")} Quy trình ISO</span><span>${icon("spark")} Trợ lý AI</span></div>
     </section>
     <div class="auth-form"><div class="card login">
-      <h2>${needsSetup ? "Tạo tài khoản quản trị đầu tiên" : "Đăng nhập"}</h2>
-      <p class="muted" style="margin:0 0 20px">${needsSetup ? "Hệ thống chưa có tài khoản nào. Tài khoản này có toàn quyền và dùng để cấp tài khoản cho người khác." : "Chào mừng trở lại. Vui lòng đăng nhập để tiếp tục."}</p>
+      <h2>${title}</h2>
+      <p class="muted" style="margin:0 0 20px">${lead}</p>
       <form id="login-form">
-        ${needsSetup ? '<div class="field"><label>Họ tên</label><input name="full_name"></div>' : ""}
-        <div class="field"><label>Tên đăng nhập</label><input name="username" required autocomplete="username"></div>
-        <div class="field"><label>Mật khẩu${needsSetup ? " (tối thiểu 8 ký tự)" : ""}</label>
-          <input name="password" type="password" required autocomplete="${needsSetup ? "new-password" : "current-password"}"></div>
+        ${needsSetup ? `<div class="field"><label>Họ tên</label><input name="full_name"></div>` : ""}
+        ${showRegister ? `<div class="field"><label>Họ tên</label><input name="full_name" required maxlength="100" autocomplete="name"></div>` : ""}
+        <div class="field"><label>Tên đăng nhập</label><input name="username" required autocomplete="username"${showRegister ? ' pattern="[A-Za-z0-9._-]{3,32}" maxlength="32" title="3–32 ký tự: chữ không dấu, số, . _ -"' : ""}>
+          ${showRegister ? '<small class="muted">Chữ không dấu, số, . _ - (3–32 ký tự), tự chuyển về chữ thường</small>' : ""}</div>
+        <div class="field"><label>Mật khẩu${needsSetup || showRegister ? " (tối thiểu 8 ký tự)" : ""}</label>
+          <input name="password" type="password" required autocomplete="${needsSetup || showRegister ? "new-password" : "current-password"}"></div>
+        ${showRegister ? `<div class="field"><label>Nhập lại mật khẩu</label><input name="password2" type="password" required autocomplete="new-password"></div>
+        <div class="field"><label>Phòng ban / công trình</label>
+          <div class="unit-pick"><input name="unit" required maxlength="100" autocomplete="off" placeholder="Gõ để tìm, ví dụ: P. Kế toán">
+            <div class="unit-pick-list" hidden></div></div>
+          <small class="muted">Chọn từ gợi ý; nếu chưa có trong danh sách thì ghi rõ tên đơn vị</small></div>
+        <div class="field"><label>Số máy lẻ nội bộ (không bắt buộc)</label><input name="phone" maxlength="20" inputmode="tel" autocomplete="off" placeholder="VD: 123">
+        </div>` : ""}
         <div class="danger" id="login-err"></div>
-        <button class="primary" style="width:100%">${needsSetup ? "Tạo tài khoản" : "Đăng nhập"} ${icon("arrow")}</button>
+        <button class="primary" style="width:100%">${needsSetup ? "Tạo tài khoản" : showRegister ? "Gửi yêu cầu đăng ký" : "Đăng nhập"} ${icon("arrow")}</button>
       </form>
+      ${switchLink ? `<p class="muted" style="margin:16px 0 0;text-align:center">${switchLink}</p>` : ""}
     </div></div></div>`;
+  $("[data-switch]")?.addEventListener("click", (e) => renderLogin(false, e.target.dataset.switch === "register"));
+  if (showRegister) {  // gợi ý phòng ban: lọc theo tên viết tắt lẫn đầy đủ, tối đa 8 dòng, không thanh cuộn; lỗi mạng thì vẫn gõ tự do được
+    const input = $("#login-form [name=unit]");
+    const box = $("#login-form .unit-pick-list");
+    let units = [];
+    let hits = [];
+    let active = -1;
+    const paint = () => {
+      const typed = input.value.trim();
+      const rowsHtml = hits.map((u, i) => `<div class="unit-pick-item${i === active ? " active" : ""}" data-i="${i}"><b>${esc(u.name)}</b>${u.full_name && u.full_name !== u.name ? `<small>${esc(u.full_name)}</small>` : ""}</div>`).join("");
+      const foot = typed && !hits.some((u) => u.name === typed) ? `<div class="unit-pick-foot">Không thấy đơn vị của bạn? Cứ giữ nguyên “${esc(typed)}”</div>` : "";
+      box.innerHTML = rowsHtml + foot;
+      box.hidden = !box.innerHTML;
+    };
+    const expand = (name) => name.replace(/^P\.\s*/, "Phòng ");  // "P. IT" tìm được bằng "Phòng IT"
+    const search = () => {
+      const q = input.value;
+      const rect = input.getBoundingClientRect();  // chỉ hiện số dòng vừa với khoảng trống, mở lên trên nếu bên dưới chật, để không đẩy bố cục trang
+      const below = window.innerHeight - rect.bottom - 16, above = rect.top - 16;
+      const up = below < 200 && above > below;
+      const limit = Math.max(3, Math.min(8, Math.floor(((up ? above : below) - 50) / 50)));
+      box.classList.toggle("up", up);
+      hits = units.filter((u) => matchWords(q, `${expand(u.name)} ${u.full_name || ""} ${u.keywords || ""}`)).slice(0, limit);
+      active = -1;
+      paint();
+    };
+    const pick = (u) => { input.value = u.name; box.hidden = true; };
+    input.addEventListener("focus", search);
+    input.addEventListener("input", search);
+    input.addEventListener("blur", () => { box.hidden = true; });
+    input.addEventListener("keydown", (e) => {
+      if (box.hidden || !hits.length) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const step = e.key === "ArrowDown" ? 1 : -1;
+        active = active < 0 ? (step > 0 ? 0 : hits.length - 1) : (active + step + hits.length) % hits.length;
+        paint();
+      } else if (e.key === "Enter" && active >= 0) {
+        e.preventDefault();
+        pick(hits[active]);
+      } else if (e.key === "Escape") {
+        box.hidden = true;
+      }
+    });
+    box.addEventListener("mousedown", (e) => {  // mousedown + preventDefault để ô nhập không mất focus trước khi chọn
+      e.preventDefault();
+      const item = e.target.closest(".unit-pick-item");
+      if (item) pick(hits[Number(item.dataset.i)]);
+    });
+    fetch("/api/auth/units").then((r) => (r.ok ? r.json() : [])).then((list) => {
+      units = list;
+      if (document.activeElement === input) search();
+    }).catch(() => {});
+  }
+  $("#login-form").querySelectorAll('input[type="password"]').forEach((inp) => {  // nút Hiện/Ẩn mật khẩu
+    const wrap = document.createElement("div");
+    wrap.className = "pw-wrap";
+    inp.replaceWith(wrap);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "link pw-toggle";
+    btn.textContent = "Hiện";
+    btn.onclick = () => {
+      const show = inp.type === "password";
+      inp.type = show ? "text" : "password";
+      btn.textContent = show ? "Ẩn" : "Hiện";
+    };
+    wrap.append(inp, btn);
+  });
   $("#login-form").onsubmit = async (e) => {
     e.preventDefault();
     const f = e.target.elements;
     const body = { username: f.username.value, password: f.password.value };
-    if (needsSetup) body.full_name = f.full_name.value;
+    if (needsSetup || showRegister) body.full_name = f.full_name.value;
+    if (showRegister) {
+      if (f.password.value !== f.password2.value) { $("#login-err").textContent = "Mật khẩu nhập lại không khớp"; return; }
+      body.unit = f.unit.value;
+      body.phone = f.phone.value;
+      try {
+        await api("/api/auth/register", { method: "POST", body });
+        $(".auth-form .card").innerHTML = `
+          <h2>Đã gửi yêu cầu đăng ký</h2>
+          <p class="muted" style="margin:0 0 20px">Tài khoản <b>${esc(body.username)}</b> đang chờ quản trị viên duyệt. Sau khi được duyệt, bạn có thể đăng nhập bằng tên đăng nhập và mật khẩu vừa tạo.</p>
+          <button class="primary" style="width:100%" data-switch="login">Quay lại đăng nhập</button>`;
+        $("[data-switch]").addEventListener("click", () => renderLogin(false, false));
+      } catch (err) {
+        $("#login-err").textContent = err.message;
+      }
+      return;
+    }
     try {
       await api(needsSetup ? "/api/auth/setup" : "/api/auth/login", { method: "POST", body });
       boot();
@@ -222,15 +376,60 @@ document.getElementById("nav").addEventListener("click", (e) => {
   const v = e.target.closest("button")?.dataset.view;
   if (v) go(v);
 });
-$("#menu-btn").onclick = () => document.body.classList.toggle("nav-open");
+$("#home-logo").onclick = () => go("overview");
+$("#menu-btn").onclick =() => document.body.classList.toggle("nav-open");
 $("#scrim").onclick = () => document.body.classList.remove("nav-open");
 addEventListener("scroll", () => document.body.classList.toggle("scrolled", scrollY > 4), { passive: true });
 const can = (feature) => !!state.user?.permissions?.includes(feature);
 const canSee = (view) => !document.querySelector(`#nav button[data-view="${view}"]`)?.hidden;
 
-function go(view, extra = {}) {
+// Đường dẫn tiếng Việt: /phong-ban/<id>/<tab>, /nhan-su/<id>, /muc-tieu-doanh-thu/<id>...; trang chủ (Tổng quan) giữ nguyên "/".
+// Đổi trang thì ghi vào lịch sử để Back/F5/chia sẻ link hoạt động. Backend trả index.html cho các đường dẫn này (spa_fallback trong app.py).
+const VIEW_SLUG = { overview: "", chart: "so-do-to-chuc", units: "phong-ban", people: "nhan-su", targets: "muc-tieu-doanh-thu", proposals: "de-xuat",
+  docs: "tai-lieu", insights: "phan-tich", chat: "tro-ly-ai", myfiles: "du-lieu-cua-toi", profile: "ho-so-cua-toi", memory: "ai-nho-gi-ve-toi",
+  history: "lich-su-thay-doi", users: "tai-khoan", access: "quyen-truy-cap" };
+const TAB_SLUG = { org: "so-do", process: "quy-trinh", docs: "tai-lieu", target: "muc-tieu", info: "chuc-nang" };
+const invert = (m) => Object.fromEntries([...Object.entries(m).map(([k, v]) => [v, k]), ...Object.keys(m).map((k) => [k, k])]);  // nhận cả tên tiếng Anh của link cũ
+const SLUG_VIEW = invert(VIEW_SLUG), SLUG_TAB = invert(TAB_SLUG);
+
+function buildPath(view, extra = {}) {
+  const parts = [VIEW_SLUG[view]];
+  if (view === "units" && state.unitId) parts.push(state.unitId, TAB_SLUG[state.unitTab]);
+  if (view === "people" && extra.peopleFocus) parts.push(extra.peopleFocus);
+  if (view === "targets" && extra.targetFocus) parts.push(extra.targetFocus);
+  return "/" + parts.filter((p) => p !== "").join("/");
+}
+function parsePath() {
+  // link cũ dạng /#/units/5/org vẫn mở được
+  const src = location.hash.startsWith("#/") ? location.hash.slice(1) : location.pathname;
+  const [slug, a, b] = src.replace(/^\/+/, "").split("/");
+  const view = slug ? SLUG_VIEW[slug] : "overview";
+  if (!view || !VIEWS[view] || !canSee(view)) return { view: "overview", extra: {} };
+  const id = Number(a), extra = {};
+  if (view === "units") {
+    if (id > 0) extra.unitId = id;
+    if (SLUG_TAB[b]) extra.unitTab = SLUG_TAB[b];
+  }
+  if (view === "people" && id > 0) extra.peopleFocus = id;
+  if (view === "targets" && id > 0) extra.targetFocus = id;
+  return { view, extra };
+}
+function syncPath(view, extra, replace) {
+  const p = buildPath(view, extra);
+  if (p === location.pathname && !location.hash) return;
+  history[replace ? "replaceState" : "pushState"](null, "", p);
+}
+addEventListener("popstate", () => {
+  if (!state.user) return;
+  const r = parsePath();
+  go(r.view, r.extra, true);
+});
+
+// fromUrl: điều hướng do mở link / Back / Forward, nên chỉ chuẩn hoá URL chứ không thêm mục lịch sử
+function go(view, extra = {}, fromUrl = false) {
   const changed = view !== state.view;
   Object.assign(state, { view }, extra);
+  syncPath(view, extra, fromUrl);
   document.body.classList.toggle("chat-mode", view === "chat");
   document.body.classList.remove("nav-open");
   document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
@@ -247,6 +446,8 @@ async function render(animate = false) {
   const main = $("#main");
   try {
     await VIEWS[state.view](main);
+    // trang đơn vị tự chọn đơn vị mặc định khi vẽ: cập nhật đường dẫn mà không thêm mục lịch sử
+    if (state.view === "units") syncPath("units", {}, true);
   } catch (err) {
     main.innerHTML = `<div class="card danger">Lỗi: ${esc(err.message)}</div>`;
   }
@@ -346,9 +547,9 @@ function openForm(title, fields, values = {}, onSave, okLabel = "Lưu") {
       } else if (f.type === "textarea") {
         input = `<textarea name="${f.name}" placeholder="${esc(f.placeholder || "")}" ${f.required ? "required" : ""}>${esc(v)}</textarea>`;
       } else if (f.type === "info") {
-        return `<p class="muted" style="margin:0 0 8px">${esc(f.label)}</p>`;
+        return f.group ? `<div class="form-group">${esc(f.label)}</div>` : `<p class="muted" style="margin:0 0 8px">${esc(f.label)}</p>`;
       } else if (f.type === "check") {
-        return `<label class="check"><input type="checkbox" name="${f.name}" ${v ? "checked" : ""}><span>${esc(f.label)}</span></label>`;
+        return `<label class="check${f.compact ? " compact" : ""}"><input type="checkbox" name="${f.name}" ${v ? "checked" : ""}><span>${esc(f.label)}</span></label>`;
       } else if (f.type === "file") {
         input = `<input name="${f.name}" type="file" accept="${esc(f.accept || "")}" ${f.required ? "required" : ""}>`;
       } else {
@@ -431,6 +632,9 @@ function openForm(title, fields, values = {}, onSave, okLabel = "Lưu") {
     }
   };
   $("#modal-cancel").onclick = () => modal.close();
+  // form dài: chỉ phần nội dung cuộn, thanh Hủy/Lưu luôn nằm trong màn hình
+  modal.classList.add("fit");
+  modal.addEventListener("close", () => modal.classList.remove("fit"), { once: true });
   modal.showModal();
 }
 
@@ -499,8 +703,7 @@ const VIEWS = {
               ${canSee("people") ? `<button class="link" onclick="go('people')">Xem tất cả →</button>` : ""}</div>
             ${divs.length ? `<div class="hbars">${divs.map(([d, n]) => `
               <div class="hbar"><span class="nm" title="${esc(d)}">${esc(d)}</span>
-                <span class="track"><span class="fill" data-w="${(n / maxDiv) * 100}"></span></span><b class="v">${fmtNum(n)}</b>
-                <span class="tip" style="--x:${34 + (n / maxDiv) * 33}%">${esc(d)}: <b>${fmtNum(n)}</b> người · ${pct(n, active.length)}%</span></div>`).join("")}</div>
+                <span class="track"><span class="fill" data-w="${(n / maxDiv) * 100}"></span></span><b class="v">${fmtNum(n)}</b></div>`).join("")}</div>
               <div class="chart-foot"><span>${divs.length} khối / nhóm</span><span>Tổng <b>${fmtNum(active.length)}</b> người</span></div>`
               : '<div class="empty">Chưa có danh sách nhân sự.</div>'}
           </div>
@@ -601,8 +804,7 @@ const VIEWS = {
             ${canSee("people") ? `<button class="link" onclick="go('people')">Xem tất cả →</button>` : ""}</div>
           ${divs.length ? `<div class="hbars">${divs.map(([d, n]) => `
             <div class="hbar"><span class="nm" title="${esc(d)}">${esc(d)}</span>
-              <span class="track"><span class="fill" data-w="${(n / maxDiv) * 100}"></span></span><b class="v">${fmtNum(n)}</b>
-              <span class="tip" style="--x:${34 + (n / maxDiv) * 33}%">${esc(d)}: <b>${fmtNum(n)}</b> người · ${pct(n, active.length)}%</span></div>`).join("")}</div>
+              <span class="track"><span class="fill" data-w="${(n / maxDiv) * 100}"></span></span><b class="v">${fmtNum(n)}</b></div>`).join("")}</div>
             <div class="chart-foot"><span>${divs.length} khối / nhóm</span><span>Tổng <b>${fmtNum(active.length)}</b> người</span></div>`
             : '<div class="empty">Chưa có danh sách nhân sự. Nhập file HCNS ở trang Nhân sự.</div>'}
         </div>
@@ -812,7 +1014,12 @@ const VIEWS = {
   },
 
   async people(main) {
-    const emps = (await api("/api/employees")).filter((e) => state.showInactive || e.status !== "inactive");
+    const all = await api("/api/employees");
+    // Mở từ liên kết (tên người tải lên...): hiện đúng người đó, kể cả khi họ đã nghỉ việc đang bị ẩn
+    const reveal = state.peopleReveal ? state.peopleFocus : null;
+    state.peopleReveal = false;
+    if (reveal && all.some((e) => e.id === reveal && e.status === "inactive")) state.showInactive = true;
+    const emps = all.filter((e) => state.showInactive || e.status !== "inactive");
     const canImport = can("import_hr");
     const canEditEmp = !!state.user.edit_all;  // chỉ admin / Ban TGĐ được thêm, sửa nhân sự
     // Nhóm theo phòng ban (theo danh sách HCNS), giữ thứ tự trong file; trong nhóm đưa người đứng đầu lên trước
@@ -896,6 +1103,18 @@ const VIEWS = {
       listEl.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => employeeForm(emps.find((e) => e.id == b.dataset.edit))));
     };
     drawList();
+    if (reveal && !state.peopleQuery.trim()) {
+      const target = emps.find((e) => e.id === reveal);
+      if (target) {
+        state.openDepts.add(target.hr_department || "Chưa có trong danh sách HCNS");  // mở đúng phòng ban chứa người đó
+        drawList();
+        const tr = listEl.querySelector(`tr[data-emp="${reveal}"]`);
+        if (tr) {
+          tr.scrollIntoView({ block: "center", behavior: "smooth" });
+          tr.classList.add("flash");
+        }
+      }
+    }
 
     // Tô đậm phần khớp; so khớp trên chuỗi không dấu nhưng hiển thị chuỗi gốc
     const hl = (text, ws) => {
@@ -1437,20 +1656,30 @@ const VIEWS = {
     main.innerHTML = `
       <div class="toolbar"><h2 style="margin:0">Kho tài liệu (${docs.length})</h2>
         ${can("docs_edit") ? DOC_ACTIONS : ""}</div>
-      <p class="muted">Quy trình ISO, hướng dẫn, biểu mẫu, quy định... Hỗ trợ ${meta.allowed_ext.join(", ")} (tối đa ${meta.max_mb} MB).
-        PDF scan được đọc bằng AI ${meta.ocr_available ? "" : '<span class="badge warn">cần khoá Gemini API</span>'}.</p>
+      <p class="muted">Quy trình ISO, hướng dẫn, biểu mẫu, quy định. Tối đa ${meta.max_mb} MB mỗi file; PDF scan được AI đọc
+        ${meta.ocr_available ? "" : '<span class="badge warn">cần khoá Gemini API</span>'}
+        <span class="doc-formats" title="${esc(meta.allowed_ext.join(", "))}">· Định dạng hỗ trợ</span></p>
       ${(() => {
         const unread = docs.filter((d) => DOC_UNREAD.has(d.extract_status));
-        return unread.length ? `<div class="unread-banner">⚠ <b>${unread.length} tài liệu chưa đọc được</b> – trợ lý AI chưa trả lời được từ nội dung các file này:
-          ${unread.slice(0, 5).map((d) => `<b>${esc((d.code || d.title).slice(0, 60))}</b>`).join(", ")}${unread.length > 5 ? "…" : ""}
-          <button class="link" id="doc-show-unread">Chỉ hiện các file này</button></div>` : "";
+        const failed = unread.filter((d) => d.extract_status === "failed").length;
+        return unread.length ? `<div class="unread-banner"><span>⚠ <b>${unread.length} tài liệu chưa đọc được</b> – trợ lý AI chưa trả lời được từ nội dung ${unread.length > 1 ? "các file này" : "file này"}.</span>
+          <span class="ub-acts"><button class="link" id="doc-show-unread">Chỉ hiện ${unread.length > 1 ? "các file này" : "file này"}</button>
+          ${failed && can("docs_edit") ? `<button class="link" id="doc-reprocess-all">Đọc lại ${failed} file lỗi</button>` : ""}</span></div>` : "";
+      })()}
+      ${(() => {
+        const n = docs.filter(needsReview).length;
+        return n ? `<div class="review-banner"><span><b>${n} tài liệu</b> AI đọc từ bản scan, cần đối chiếu với bản gốc.</span>
+          <button class="link" id="doc-show-review">Chỉ hiện các file này</button></div>` : "";
       })()}
       <div class="card" style="margin-bottom:16px">
         <form id="doc-search" class="chat-input" style="margin:0">
-          <input name="q" autocomplete="off" placeholder="Tìm trong nội dung tài liệu (không cần gõ dấu)..." value="${esc(state.docQuery)}"
+          <input name="q" autocomplete="off" placeholder="${state.docContent ? "Tìm theo tên file và nội dung" : "Tìm theo tên file"} (không cần gõ dấu)..." value="${esc(state.docQuery)}"
                  style="flex:1;padding:8px;border:1px solid var(--line);border-radius:8px">
           <button class="primary">Tìm</button>
         </form>
+        <label class="muted small" style="display:inline-flex;gap:6px;align-items:center;margin-top:8px;cursor:pointer">
+          <input type="checkbox" id="doc-in-content" ${state.docContent ? "checked" : ""}> Tìm cả trong nội dung tài liệu (có thể ra nhiều kết quả)
+        </label>
         <div class="doc-filters" id="doc-filters">
           <select name="unit"><option value="">Tất cả đơn vị</option><option value="none">Tài liệu chung</option>
             ${[...new Map(docs.filter((d) => d.unit_id).map((d) => [d.unit_id, d.unit_name])).entries()].sort((a, b) => a[1].localeCompare(b[1], "vi"))
@@ -1458,8 +1687,11 @@ const VIEWS = {
           <select name="type"><option value="">Tất cả loại</option>
             ${Object.entries(DOC_LABELS).filter(([k]) => docs.some((d) => d.doc_type === k)).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join("")}</select>
           <select name="status"><option value="">Mọi trạng thái</option>
-            ${docs.some((d) => DOC_UNREAD.has(d.extract_status)) ? '<option value="unread">⚠ Chưa đọc được</option>' : ""}
-            ${Object.entries(DOC_STATUS).filter(([k]) => docs.some((d) => d.extract_status === k)).map(([k, v]) => `<option value="${k}">${esc(v[0])}</option>`).join("")}</select>
+            ${docs.some((d) => DOC_UNREAD.has(d.extract_status)) ? '<option value="unread">Chưa đọc được</option>' : ""}
+            ${docs.some(isUnreviewed) ? '<option value="unreviewed">Cần đối chiếu bản gốc</option>' : ""}
+            ${docs.some(cannotReview) ? '<option value="noreview">Không mở được đối chiếu</option>' : ""}
+            ${docs.some(hasWarnNote) ? '<option value="warn">Cần kiểm tra lại</option>' : ""}
+            ${docs.some(reviewDone) ? '<option value="reviewed">Đã đối chiếu</option>' : ""}</select>
           <button type="button" class="link" id="doc-filter-reset" hidden>✕ Bỏ lọc</button>
           <span class="muted" id="doc-filter-count"></span>
         </div>
@@ -1470,7 +1702,9 @@ const VIEWS = {
     const filt = (list) => list.filter((d) =>
       (!F.unit || (F.unit === "none" ? !d.unit_id : String(d.unit_id) === F.unit)) &&
       (!F.type || d.doc_type === F.type) &&
-      (!F.status || (F.status === "unread" ? DOC_UNREAD.has(d.extract_status) : d.extract_status === F.status)));
+      (!F.status || (F.status === "unread" ? DOC_UNREAD.has(d.extract_status)
+        : F.status === "unreviewed" ? isUnreviewed(d) : F.status === "noreview" ? cannotReview(d)
+        : F.status === "warn" ? hasWarnNote(d) : reviewDone(d))));
     const filtering = () => !!(F.unit || F.type || F.status);
     const renderAll = () => {
       const list = filt(docs);
@@ -1479,15 +1713,36 @@ const VIEWS = {
       $("#doc-filter-count").textContent = filtering() && !state.docQuery.trim() ? `${list.length}/${docs.length} tài liệu` : "";
       if (!$("#doc-all").hidden) bindDocActions($("#doc-all"), meta, units);
     };
-    const showUnreadBtn = $("#doc-show-unread");
-    if (showUnreadBtn) showUnreadBtn.onclick = () => { F.status = "unread"; document.querySelector('#doc-filters select[name="status"]').value = "unread"; renderAll(); };
+    // Nút ở banner bật/tắt bộ lọc: bấm lần nữa thì bỏ lọc
+    const bannerToggle = (btn, status) => {
+      if (!btn) return;
+      btn.onclick = () => {
+        F.status = F.status === status ? "" : status;
+        const st = document.querySelector('#doc-filters select[name="status"]');
+        st.value = F.status;
+        st.dispatchEvent(new Event("sync"));
+        renderAll();
+      };
+    };
+    bannerToggle($("#doc-show-unread"), "unread");
+    bannerToggle($("#doc-show-review"), "unreviewed");
+    const reprocAllBtn = $("#doc-reprocess-all");
+    if (reprocAllBtn) reprocAllBtn.onclick = async () => {
+      if (!(await confirmBox("Đọc lại các file lỗi?", "Hệ thống đọc lần lượt từng file và có thể tốn hạn mức AI. Nếu hết hạn mức, phần còn lại sẽ dừng và đọc lại sau.", { okText: "Đọc lại" }))) return;
+      try {
+        const r = await api("/api/documents/reprocess-unread", { method: "POST" });
+        toast(`Đã đưa ${r.queued} file vào hàng đợi đọc lại.`);
+        render();
+      } catch (e) { toast(e.message, "err"); }
+    };
     document.querySelectorAll("#doc-filters select").forEach((sel) => {
       sel.value = F[sel.name];
       sel.onchange = () => { F[sel.name] = sel.value; renderAll(); showHits(); };
+      enhanceSelect(sel, { searchable: sel.name === "unit" });
     });
     $("#doc-filter-reset").onclick = () => {
       Object.assign(F, { unit: "", type: "", status: "" });
-      document.querySelectorAll("#doc-filters select").forEach((x) => (x.value = ""));
+      document.querySelectorAll("#doc-filters select").forEach((x) => { x.value = ""; x.dispatchEvent(new Event("sync")); });
       renderAll(); showHits();
     };
     $("#up-doc")?.addEventListener("click", () => uploadForm(meta, units, null));
@@ -1500,7 +1755,7 @@ const VIEWS = {
       $("#doc-all").hidden = !!q;
       if (!q) return ($("#doc-hits").innerHTML = "");
       if (!$("#doc-hits").innerHTML) $("#doc-hits").innerHTML = '<div class="muted" style="margin-top:10px">Đang tìm…</div>';
-      const hits = filt(await api(`/api/documents/search?q=${encodeURIComponent(q)}`));
+      const hits = filt(await api(`/api/documents/search?q=${encodeURIComponent(q)}${state.docContent ? "&content=true" : ""}`));
       if (my !== seq) return;
       $("#doc-hits").innerHTML = `
         <div class="toolbar" style="margin:10px 0 0">
@@ -1519,6 +1774,11 @@ const VIEWS = {
       showHits();
     };
     const qInput = $("#doc-search").elements.q;
+    $("#doc-in-content").onchange = (e) => {
+      state.docContent = e.target.checked;
+      qInput.placeholder = `${state.docContent ? "Tìm theo tên file và nội dung" : "Tìm theo tên file"} (không cần gõ dấu)...`;
+      showHits();
+    };
     qInput.oninput = () => {
       const form = $("#doc-search");
       clearTimeout(form._t);
@@ -1534,14 +1794,16 @@ const VIEWS = {
 
   async users(main) {
     const [users, units] = await Promise.all([api("/api/users"), api("/api/units")]);
+    const isAdmin = state.user.role === "admin";
+    const pendingActions = (x) => `<button class="link" data-approve="${x.id}">Duyệt</button> · <button class="link danger" data-del="${x.id}" data-user="${esc(x.username)}">Từ chối</button>`;
     main.innerHTML = `
-      <div class="toolbar"><h2 style="margin:0">Tài khoản (${users.length})</h2><button class="primary" id="add-user">+ Tạo tài khoản</button></div>
+      <div class="toolbar"><h2 style="margin:0">Tài khoản (${users.length})</h2>${isAdmin ? '<button class="primary" id="add-user">+ Tạo tài khoản</button>' : ""}</div>
       <div class="card">
         <table>
           <tr><th>Tên đăng nhập</th><th>Họ tên</th><th>Hồ sơ nhân sự</th><th>Vai trò</th><th>Đơn vị phụ trách</th><th>Quyền cấp thêm</th><th>Dung lượng riêng</th><th>Trạng thái</th><th></th></tr>
-          ${users.map((x) => `<tr><td>${esc(x.username)}</td><td>${esc(x.full_name || "")}</td><td>${x.employee_name ? esc(x.employee_name) : '<span class="badge warn">Chưa gán</span>'}</td><td>${esc(state.roles[x.role])}</td>
-            <td>${esc(x.unit_name || "—")}</td><td>${["admin", "ceo"].includes(x.role) ? '<span class="muted">Mặc định có đủ</span>' : (x.granted.map((f) => esc(FEATURE_LABELS[f])).join(", ") || '<span class="muted">—</span>')}</td><td>${["admin", "ceo"].includes(x.role) ? '<span class="muted">Không giới hạn</span>' : `${fmtSize(x.private_bytes) || "0 KB"} / ${x.quota_mb || 300} MB`}</td><td>${x.active ? '<span class="badge ok">Hoạt động</span>' : '<span class="badge warn">Đã khoá</span>'}${x.locked ? ' <span class="badge warn">Sai mật khẩu nhiều lần</span>' : ""}</td>
-            <td><button class="link" data-edit="${x.id}">Sửa</button> · <button class="link" data-link="${x.id}">Gán hồ sơ</button>${["admin", "ceo"].includes(x.role) ? "" : ` · <button class="link" data-perm="${x.id}">Cấp quyền</button>`}${x.role === "viewer" ? "" : ` · <button class="link" data-mem="${x.id}">Ghi chú AI</button>`}${x.locked ? ` · <button class="link" data-unlock="${x.id}">Mở khoá đăng nhập</button>` : ""}</td></tr>`).join("")}
+          ${users.map((x) => `<tr><td>${esc(x.username)}</td><td>${esc(x.full_name || "")}${x.pending_approval && (x.register_unit || x.register_note) ? `<div class="muted small">${esc([x.register_unit || x.register_note, x.register_phone ? `máy lẻ ${x.register_phone}` : ""].filter(Boolean).join(" · "))}</div>` : ""}</td><td>${x.employee_name ? esc(x.employee_name) : '<span class="badge warn">Chưa gán</span>'}</td><td>${esc(state.roles[x.role])}</td>
+            <td>${esc(x.unit_name || "—")}</td><td>${["admin", "ceo"].includes(x.role) ? '<span class="muted">Mặc định có đủ</span>' : (x.granted.map((f) => esc(FEATURE_LABELS[f])).join(", ") || '<span class="muted">—</span>')}</td><td>${["admin", "ceo"].includes(x.role) ? '<span class="muted">Không giới hạn</span>' : `${fmtSize(x.private_bytes) || "0 KB"} / ${x.quota_mb || 300} MB`}</td><td>${x.pending_approval ? '<span class="badge warn">Chờ duyệt</span>' : x.active ? '<span class="badge ok">Hoạt động</span>' : '<span class="badge warn">Đã khoá</span>'}${x.locked ? ' <span class="badge warn">Sai mật khẩu nhiều lần</span>' : ""}</td>
+            <td style="white-space:nowrap">${x.pending_approval ? pendingActions(x) : `${isAdmin ? `<button class="link" data-edit="${x.id}">Sửa</button> · <button class="link" data-link="${x.id}">Gán hồ sơ</button>${["admin", "ceo"].includes(x.role) ? "" : ` · <button class="link" data-perm="${x.id}">Cấp quyền</button>`}` : ""}${x.role === "viewer" ? "" : `${isAdmin ? " · " : ""}<button class="link" data-mem="${x.id}">Ghi chú AI</button>`}${isAdmin && x.locked ? ` · <button class="link" data-unlock="${x.id}">Mở khoá đăng nhập</button>` : ""}${x.id !== state.user.id ? `${isAdmin || x.role !== "viewer" ? " · " : ""}<button class="link danger" data-del="${x.id}" data-user="${esc(x.username)}">Xoá</button>` : ""}`}</td></tr>`).join("")}
         </table>
       </div>
       <div class="card" style="margin-top:16px">
@@ -1551,8 +1813,8 @@ const VIEWS = {
           <tr><td colspan="4" class="muted">Tài liệu, Phân tích và Nhập file HCNS: chỉ admin/Ban TGĐ mặc định có; các tài khoản khác cần được cấp ở nút "Cấp quyền".</td></tr>
           <tr><td>Quản trị hệ thống</td><td>Tất cả</td><td>Tất cả + tài khoản</td><td>Có</td></tr>
           <tr><td>Ban Tổng Giám đốc</td><td>Tất cả</td><td>Tất cả</td><td>Có</td></tr>
-          <tr><td>Quản lý đơn vị</td><td>Sơ đồ, phòng ban, nhân sự</td><td>Đơn vị mình + đơn vị con: chức danh, quy trình, mục tiêu (tài liệu: cần được cấp)</td><td>Không</td></tr>
-          <tr><td>Chỉ xem</td><td>Sơ đồ, phòng ban, nhân sự</td><td>Không</td><td>Không</td></tr>
+          <tr><td>Quản lý đơn vị</td><td>Sơ đồ, phòng ban, nhân sự</td><td>Đơn vị mình + đơn vị con: chức danh, quy trình, mục tiêu (tài liệu: cần được cấp)</td><td>Có</td></tr>
+          <tr><td>Chỉ xem</td><td>Sơ đồ, phòng ban, nhân sự</td><td>Không</td><td>Không (cấp quyền "Dùng trợ lý AI" nếu cần)</td></tr>
         </table>
       </div>`;
     const form = (x, free = []) => openForm(x.id ? `Sửa tài khoản ${x.username}` : "Tạo tài khoản", [
@@ -1570,7 +1832,7 @@ const VIEWS = {
       const { _tpl, ...body } = d;
       return x.id ? api(`/api/users/${x.id}`, { method: "PUT", body }) : api("/api/users", { method: "POST", body: { ...body, features: (PERM_TEMPLATES[_tpl] || [])[1] || [] } });
     });
-    $("#add-user").onclick = async () => {
+    if (isAdmin) $("#add-user").onclick = async () => {
       try {
         const opt = await api("/api/employee-links");
         form({}, opt.employees.filter((e) => !e.linked_user_id));
@@ -1595,20 +1857,35 @@ const VIEWS = {
       $("#link-requests").querySelectorAll("[data-lk-ok]").forEach((b) => (b.onclick = () => decide(b.dataset.lkOk, true)));
       $("#link-requests").querySelectorAll("[data-lk-no]").forEach((b) => (b.onclick = () => decide(b.dataset.lkNo, false)));
     }).catch(() => {});
+    main.querySelectorAll("[data-approve]").forEach((b) => (b.onclick = () => {
+      const x = users.find((y) => y.id == b.dataset.approve);
+      openForm(`Duyệt tài khoản ${x.username}`, [
+        { name: "role", label: "Vai trò", type: "select", options: Object.entries(state.roles), default: "viewer" },
+        { name: "unit_id", label: "Đơn vị phụ trách (cho vai trò Quản lý đơn vị)", type: "select", numeric: true, options: [["", "— Không —"], ...units.map((u) => [u.id, u.name])] },
+        tplField,
+        ...permFields(),
+      ], { role: "viewer" }, (d) => api(`/api/users/${x.id}/approve`, { method: "POST", body: {
+        role: d.role, unit_id: d.unit_id, features: pickedFeatures(d),
+      } }).then(() => { toast(`Đã duyệt tài khoản ${x.username}.`); refreshPending(); }), "Duyệt");
+      bindPermForm();
+    }));
     main.querySelectorAll("[data-unlock]").forEach((b) => (b.onclick = async () => {
       try { await api(`/api/users/${b.dataset.unlock}/unlock`, { method: "POST" }); render(); } catch (e) { toast(e.message, "err"); }
     }));
+    main.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
+      const typed = await ask({ title: `Xoá vĩnh viễn tài khoản ${b.dataset.user}?`, message: "Tài khoản sẽ bị xoá ngay và đăng xuất. Toàn bộ file riêng, ghi chú AI và lịch sử chat của tài khoản này sẽ bị xoá, không thể khôi phục. Tài liệu đã đưa lên thư viện chung được giữ lại. Gõ lại tên đăng nhập để xác nhận.", input: "", okText: "Xoá tài khoản", danger: true });
+      if (!typed) return;
+      try {
+        await api(`/api/users/${b.dataset.del}`, { method: "DELETE", body: { confirm: typed } });
+        toast(`Đã xoá tài khoản ${b.dataset.user}.`);
+        render();
+      } catch (e) { toast(e.message, "err"); }
+    }));
     main.querySelectorAll("[data-perm]").forEach((b) => (b.onclick = () => {
       const x = users.find((y) => y.id == b.dataset.perm);
-      const checked = (f) => (f === "docs_view" && x.granted.includes("docs_edit")) || x.granted.includes(f);
-      openForm(`Cấp quyền cho ${x.username}`, [tplField, ...Object.entries(FEATURE_LABELS).map(([f, l]) => ({
-        name: f, label: l, type: "select", numeric: true, options: [[0, "Không"], [1, "Được dùng"]], default: checked(f) ? 1 : 0,
-      }))], Object.fromEntries(Object.keys(FEATURE_LABELS).map((f) => [f, checked(f) ? 1 : 0])),
-      (d) => api(`/api/users/${x.id}/permissions`, { method: "PUT", body: { features: Object.keys(FEATURE_LABELS).filter((f) => Number(d[f]) === 1) } }));
-      $("#modal-form").elements._tpl.onchange = (e) => {
-        const on = PERM_TEMPLATES[e.target.value][1];
-        Object.keys(FEATURE_LABELS).forEach((f) => ($("#modal-form").elements[f].value = on.includes(f) ? 1 : 0));
-      };
+      openForm(`Cấp quyền cho ${x.username}`, [tplField, ...permFields()], permValues(x.granted),
+      (d) => api(`/api/users/${x.id}/permissions`, { method: "PUT", body: { features: pickedFeatures(d) } }));
+      bindPermForm();
     }));
     main.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => form(users.find((x) => x.id == b.dataset.edit))));
     main.querySelectorAll("[data-link]").forEach((b) => (b.onclick = async () => {
@@ -2711,12 +2988,148 @@ function docHref(d) {
   return `/api/documents/${d.id}/file?inline=1`;
 }
 
-const isAiPdf = (d) => /AI/.test(d.extract_note || "") && /\.pdf$/i.test(d.filename || "") && d.extract_status === "ok";
+// Khớp tên không dấu: mỗi từ gõ vào phải là phần đầu của một từ trong văn bản (không cần đúng thứ tự)
+const foldVN = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/g, "d").toLowerCase();
+const wordsVN = (s) => foldVN(s).split(/[^a-z0-9]+/).filter(Boolean);  // tách từ, bỏ dấu và dấu câu
+function matchWords(query, text) {
+  const q = wordsVN(query), hay = wordsVN(text);
+  return q.every((t) => hay.some((w) => w.startsWith(t)));
+}
+
+// Thay hộp chọn mặc định của trình duyệt (thanh cuộn, viền cứng) bằng menu tự vẽ; <select> gốc vẫn giữ giá trị và sự kiện change.
+// Sau khi gán sel.value bằng code, gọi sel.dispatchEvent(new Event("sync")) để nhãn cập nhật theo.
+// searchable: thêm ô gõ để lọc các mục (dùng khi danh sách dài).
+function enhanceSelect(sel, { searchable = false } = {}) {
+  const wrap = document.createElement("div");
+  wrap.className = "dd";
+  sel.before(wrap);
+  wrap.append(sel);
+  sel.classList.add("dd-native");
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "dd-btn";
+  const menu = document.createElement("div");
+  menu.className = "dd-menu";
+  menu.setAttribute("role", "listbox");
+  const search = document.createElement("input");
+  search.className = "dd-search";
+  search.placeholder = "Tìm…";
+  search.autocomplete = "off";
+  const list = document.createElement("div");
+  list.className = "dd-list";
+  if (searchable) menu.append(search);
+  menu.append(list);
+  wrap.append(btn, menu);
+  const close = () => { wrap.classList.remove("open"); document.removeEventListener("click", onDoc, true); };
+  const onDoc = (e) => { if (!wrap.contains(e.target)) close(); };
+  const paintList = () => {
+    const opts = [...sel.options].filter((o) => !search.value.trim() || matchWords(search.value, o.textContent));
+    list.innerHTML = opts.length ? opts.map((o) =>
+      `<button type="button" role="option" class="dd-opt${o.value === sel.value ? " sel" : ""}" data-v="${esc(o.value)}">${esc(o.textContent)}</button>`).join("")
+      : '<div class="dd-empty">Không có mục nào khớp</div>';
+  };
+  const sync = () => {
+    const cur = sel.selectedOptions[0];
+    btn.textContent = cur ? cur.textContent : "";
+    btn.classList.toggle("active", !!sel.value);
+    paintList();
+  };
+  btn.onclick = () => {
+    if (wrap.classList.contains("open")) return close();
+    search.value = "";
+    sync();
+    wrap.classList.add("open");
+    document.addEventListener("click", onDoc, true);
+    if (searchable) search.focus({ preventScroll: true });
+    menu.querySelector(".sel")?.scrollIntoView({ block: "nearest" });
+  };
+  search.oninput = paintList;
+  search.onkeydown = (e) => {  // Enter chọn mục khớp đầu tiên
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    list.querySelector(".dd-opt")?.click();
+  };
+  menu.onclick = (e) => {
+    const o = e.target.closest(".dd-opt");
+    if (!o) return;
+    sel.value = o.dataset.v;
+    sel.dispatchEvent(new Event("change"));
+    sync();
+    close();
+  };
+  wrap.onkeydown = (e) => { if (e.key === "Escape") { close(); btn.focus(); } };
+  sel.addEventListener("sync", sync);
+  sync();
+}
+
+const isAiPdf = (d) => !!d.ai_read;  // PDF do AI đọc (backend xác định theo cấu trúc, không theo chữ trong ghi chú)
 function reviewLabel(d) {
   const done = d.reviewed_pages || 0, total = d.page_count || 0;
   if (total && done >= total) return "✓ Đã đối chiếu đủ";
   return done ? `Đối chiếu (${done}/${total} trang)` : "Đối chiếu bản gốc";
 }
+const isUnreviewed = (d) => needsReview(d);  // PDF scan do AI đọc, chưa đối chiếu đủ từng trang
+
+// Khung chữ khi đối chiếu: sửa thẳng trên bản đã dựng (contenteditable); tab "Markdown" là ô mã gốc #rv-text, nguồn dữ liệu khi lưu.
+// Chỉ đổi HTML ngược về markdown khi người duyệt thật sự gõ (dirty), để bản chưa sửa giữ nguyên từng ký tự.
+const rvRender = (text) => window.marked ? marked.parse(esc(text).replace(/&gt;/g, ">")) : `<pre>${esc(text)}</pre>`;
+let rvTd;
+function rvToMd(html) {
+  if (!rvTd) {
+    rvTd = new TurndownService({ headingStyle: "atx", bulletListMarker: "*", emDelimiter: "*", hr: "---" });
+    if (window.turndownPluginGfm) rvTd.use(turndownPluginGfm.gfm);
+  }
+  return rvTd.turndown(html);
+}
+function rvTextHtml(text, editable) {
+  return `${editable ? '<div class="rv-tabs"><button type="button" class="rv-code" title="Xem và sửa mã markdown gốc">‹/› Mã</button></div>' : ""}
+    <div id="rv-view" class="rv-view" ${editable && window.TurndownService ? 'contenteditable="true" spellcheck="false"' : ""}>${rvRender(text)}</div>
+    <textarea id="rv-text" class="rv-text" hidden ${editable ? "" : "readonly"}>${esc(text)}</textarea>`;
+}
+// Lấy chữ hiện tại của khung (đồng bộ từ bản soạn thảo nếu đã sửa ở đó)
+function rvSync(root) {
+  const view = root.querySelector("#rv-view"), area = root.querySelector("#rv-text");
+  if (view.dataset.dirty) { area.value = rvToMd(view.innerHTML); delete view.dataset.dirty; }
+  return area.value;
+}
+function rvWireTabs(root) {
+  const view = root.querySelector("#rv-view"), area = root.querySelector("#rv-text");
+  view.addEventListener("input", () => { view.dataset.dirty = "1"; });
+  view.addEventListener("paste", (e) => { e.preventDefault(); document.execCommand("insertText", false, e.clipboardData.getData("text/plain")); });
+  // Enter ở cuối dòng của mục cha (có danh sách con): thêm mục con đầu tiên ngay trong khối, thay vì để trình duyệt nhảy xuống mục cha kế tiếp
+  view.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
+    const sel = getSelection();
+    if (!sel.rangeCount || !sel.isCollapsed) return;
+    const li = (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement).closest("li");
+    const sub = li && [...li.children].find((c) => c.tagName === "UL" || c.tagName === "OL");
+    if (!sub || !view.contains(li)) return;
+    const rest = document.createRange();
+    rest.setStart(sel.anchorNode, sel.anchorOffset);
+    rest.setEndBefore(sub);
+    if (rest.toString().trim()) return;  // còn chữ phía sau con trỏ: giữ hành vi mặc định
+    e.preventDefault();
+    const item = document.createElement("li");
+    item.innerHTML = "<br>";
+    sub.insertBefore(item, sub.firstChild);
+    sel.collapse(item, 0);
+    view.dataset.dirty = "1";
+  });
+  const code = root.querySelector(".rv-code");
+  if (code) code.onclick = () => {
+    const edit = area.hidden;  // đang ở khung soạn thảo thì chuyển sang mã
+    if (edit) rvSync(root); else view.innerHTML = rvRender(area.value);
+    view.hidden = edit; area.hidden = !edit;
+    code.textContent = edit ? "← Soạn thảo" : "‹/› Mã";
+    (edit ? area : view).focus();
+  };
+}
+
+// Trả về hàm báo còn chữ sửa chưa lưu (nhãn nút xác nhận giữ nguyên)
+function rvTrack(root, original) {
+  return () => rvSync(root).trim() !== (original || "").trim();
+}
+const rvLeave = (changed) => !changed() || confirm("Trang này có chữ đã sửa nhưng chưa lưu. Bỏ thay đổi?");
 
 // Đối chiếu từng trang: ảnh trang gốc bên trái, chữ AI đã đọc bên phải; người duyệt xác nhận đúng hoặc sửa tại chỗ
 async function reviewDoc(docId, onClose) {
@@ -2724,6 +3137,7 @@ async function reviewDoc(docId, onClose) {
   let data;
   try { data = await api(`/api/documents/${docId}/review`); } catch (e) { toast(e.message, "err"); return; }
   const editable = can("docs_edit");
+  if (data.whole) return reviewWhole(docId, data, onClose);
   let cur = Math.max(1, (data.pages.find((p) => !p.status && p.flags.length) || data.pages.find((p) => !p.status) || data.pages[0]).page);
   $("#modal-title").textContent = `Đối chiếu: ${data.title}`;
   modal.classList.add("wide");
@@ -2741,8 +3155,8 @@ async function reviewDoc(docId, onClose) {
       <div class="rv-chips">${data.pages.map(chip).join("")}</div>
       ${p.flags.length ? `<div class="unread-banner" style="margin-top:10px">⚠ ${p.flags.map(esc).join("; ")}</div>` : ""}
       <div class="rv-grid">
-        <div class="rv-img"><img src="/api/documents/${docId}/page/${cur}.png" alt="Trang ${cur} bản gốc"></div>
-        <div><textarea id="rv-text" class="rv-text" ${editable ? "" : "readonly"}>${esc(p.text)}</textarea>
+        <div class="rv-img"><a href="/api/documents/${docId}/page/${cur}.png" target="_blank" rel="noopener" title="Bấm để mở ảnh cỡ lớn"><img src="/api/documents/${docId}/page/${cur}.png" alt="Trang ${cur} bản gốc"></a></div>
+        <div>${rvTextHtml(p.text, editable)}
           <div class="rv-bar">
             <button type="button" class="ghost" id="rv-prev" ${cur <= 1 ? "disabled" : ""}>◀ Trước</button>
             <span class="muted">Trang ${cur}/${data.total}</span>
@@ -2750,9 +3164,11 @@ async function reviewDoc(docId, onClose) {
             ${editable ? `<button type="button" class="primary" id="rv-ok">${"✓ Chữ khớp bản gốc – sang trang sau"}</button>
             ${p.status ? `<button type="button" class="ghost" id="rv-undo" title="${p.status === "edited" ? "Bỏ dấu đã đối chiếu (chữ đã sửa vẫn giữ nguyên)" : "Bỏ dấu đã đối chiếu"}">↩ Bỏ xác nhận trang này</button>` : ""}` : ""}
           </div></div></div>`;
-    body.querySelectorAll(".rv-chips [data-pg]").forEach((b) => (b.onclick = () => { cur = +b.dataset.pg; draw(); }));
-    $("#rv-prev").onclick = () => { cur--; draw(); };
-    $("#rv-next").onclick = () => { cur++; draw(); };
+    rvWireTabs(body);
+    const changed = rvTrack(body, p.text);
+    body.querySelectorAll(".rv-chips [data-pg]").forEach((b) => (b.onclick = () => { if (rvLeave(changed)) { cur = +b.dataset.pg; draw(); } }));
+    $("#rv-prev").onclick = () => { if (rvLeave(changed)) { cur--; draw(); } };
+    $("#rv-next").onclick = () => { if (rvLeave(changed)) { cur++; draw(); } };
     const undo = $("#rv-undo");
     if (undo) undo.onclick = async () => {
       undo.disabled = true;
@@ -2761,7 +3177,7 @@ async function reviewDoc(docId, onClose) {
     };
     const ok = $("#rv-ok");
     if (ok) ok.onclick = async () => {
-      const text = $("#rv-text").value;
+      const text = rvSync(body);
       ok.disabled = true;
       try {
         const r = await api(`/api/documents/${docId}/review/${cur}`, { method: "PUT", body: text.trim() !== p.text.trim() ? { text } : {} });
@@ -2775,30 +3191,108 @@ async function reviewDoc(docId, onClose) {
   modal.showModal();
 }
 
+// Đối chiếu cả file: văn bản AI đọc không có đánh dấu trang nên không ghép từng trang được. Các trang gốc xếp dọc bên trái, toàn bộ chữ bên phải.
+function reviewWhole(docId, data, onClose) {
+  const modal = $("#modal"), body = $("#modal-body");
+  const editable = can("docs_edit");
+  let status = data.status;
+  $("#modal-title").textContent = `Đối chiếu: ${data.title}`;
+  modal.classList.add("wide");
+  $("#modal-ok").textContent = "Đóng";
+  $("#modal-cancel").style.display = "none";
+  $("#modal-form").onsubmit = (e) => { e.preventDefault(); modal.close(); };
+  modal.addEventListener("close", () => { modal.classList.remove("wide"); $("#modal-cancel").style.display = ""; onClose && onClose(); }, { once: true });
+  const draw = () => {
+    body.innerHTML = `<div class="muted" style="margin-bottom:8px">${status ? (status === "edited" ? "✓ Đã đối chiếu và sửa" : "✓ Đã đối chiếu") : `Chưa đối chiếu · ${data.total} trang`} – văn bản này không chia theo trang, nên đối chiếu cả file một lần.</div>
+      <div class="rv-grid">
+        <div class="rv-img" style="max-height:70vh;overflow:auto">${Array.from({ length: data.total }, (_, i) =>
+          `<img loading="lazy" src="/api/documents/${docId}/page/${i + 1}.png" alt="Trang ${i + 1} bản gốc" style="margin-bottom:8px">`).join("")}</div>
+        <div>${rvTextHtml(data.text, editable)}
+          <div class="rv-bar">
+            ${editable ? `<button type="button" class="primary" id="rv-ok">✓ Chữ khớp bản gốc</button>
+            ${status ? '<button type="button" class="ghost" id="rv-undo">↩ Bỏ xác nhận</button>' : ""}` : ""}
+          </div></div></div>`;
+    rvWireTabs(body);
+    rvTrack(body, data.text);
+    const undo = $("#rv-undo");
+    if (undo) undo.onclick = async () => {
+      undo.disabled = true;
+      try { await api(`/api/documents/${docId}/review`, { method: "DELETE" }); status = null; draw(); }
+      catch (e) { toast(e.message, "err"); undo.disabled = false; }
+    };
+    const ok = $("#rv-ok");
+    if (ok) ok.onclick = async () => {
+      const text = rvSync(body);
+      ok.disabled = true;
+      try {
+        const r = await api(`/api/documents/${docId}/review`, { method: "PUT", body: text.trim() !== (data.text || "").trim() ? { text } : {} });
+        status = r.status; data.text = text.trim(); draw();
+      } catch (e) { toast(e.message, "err"); ok.disabled = false; }
+    };
+  };
+  draw();
+  modal.showModal();
+}
+
+// Người tải lên: bấm mở đúng hồ sơ nhân sự theo id (không theo tên, vì có thể trùng tên); kèm đơn vị để phân biệt
+function uploaderHtml(d) {
+  const unit = d.uploader_unit ? ` · ${esc(d.uploader_unit)}` : "";
+  if (!d.uploader_employee_id || !canSee("people")) return `${esc(d.uploader_name)}${unit}`;
+  return `<button class="link" onclick="document.querySelector('#modal').close();go('people',{peopleQuery:'',peopleFocus:${Number(d.uploader_employee_id)},peopleReveal:true})">${esc(d.uploader_name)}</button>${unit}`;
+}
+
+const isAiNote = (d) => d.extract_status === "ok" && /AI/.test(d.extract_note || "");
+// PDF do AI đọc: đã đối chiếu đủ các trang / còn cần đối chiếu (kể cả file máy chủ báo chưa mở được màn đối chiếu)
+const reviewDone = (d) => isAiPdf(d) && !!d.page_count && (d.reviewed_pages || 0) >= d.page_count;
+const cannotReview = (d) => isAiPdf(d) && !reviewDone(d) && d.can_review === false;  // mất file PDF gốc trên máy chủ
+const needsReview = (d) => isAiPdf(d) && !reviewDone(d) && d.can_review !== false;
+// Dòng cảnh báo màu vàng dưới tên file (ghi chú đọc/đối chiếu); lỗi chưa đọc được hiện màu đỏ nên không tính
+const hasWarnNote = (d) => !!d.extract_note && !isAiNote(d) && !DOC_UNREAD.has(d.extract_status);
+
 function docTable(docs, showUnit, query = "") {
   if (!docs.length) return '<div class="empty">Chưa có tài liệu nào.</div>';
-  return `<table>
-    <tr><th>Tài liệu</th>${showUnit ? "<th>Đơn vị</th>" : ""}<th>Loại</th><th>Trạng thái</th><th>Tải lên</th><th></th></tr>
+  // Danh sách 3 cột: thông tin (tên + một dòng phụ) | trạng thái (chỉ nổi bật khi cần chú ý) | thao tác (icon)
+  const fmtDay = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || ""); return m ? `${m[3]}/${m[2]}/${m[1]}` : ""; };
+  // Chỉ hiện khi có gì cần chú ý: lỗi/đang xử lý, hoặc PDF AI đọc mà đối chiếu được. File bình thường để trống.
+  const stateCell = (d) => {
+    const [lbl, cls] = DOC_STATUS[d.extract_status] || [d.extract_status, ""];
+    if (d.extract_status !== "ok") return `<span class="badge ${cls}">${lbl}</span>`;
+    if (!isAiPdf(d)) return "";
+    if (reviewDone(d)) return `<button class="link doc-reviewed" data-review-doc="${d.id}" title="Mở lại để xem">${reviewLabel(d)}</button>`;
+    // can_review === false: máy chủ không còn file PDF gốc để đặt cạnh văn bản → cần tải lại file
+    if (d.can_review === false) return `<span class="badge" title="Máy chủ không còn file PDF gốc nên không đối chiếu được. Tải lại file này lên rồi đối chiếu.">Không mở được đối chiếu</span>`;
+    return `<button class="badge doc-review warn" data-review-doc="${d.id}" title="${esc(d.extract_note)}">${reviewLabel(d)}</button>`;
+  };
+  return `<table class="doc-list">
     ${docs.map((d) => {
-      const [lbl, cls] = DOC_STATUS[d.extract_status] || [d.extract_status, ""];
-      return `<tr${DOC_UNREAD.has(d.extract_status) ? ' class="row-bad"' : ""}>
-        <td>${docHref(d) ? `<a class="doc-title" href="${esc(docHref(d))}" target="_blank" rel="noopener">` : ""}<b>${query ? hlDoc(`${d.code || ""} ${d.title}`.trim(), query) : `${esc(d.code || "")} ${esc(d.title)}`}</b>${docHref(d) ? "</a>" : ""}${d.version ? ` <span class="badge">v${esc(d.version)}</span>` : ""}${d.access_level && d.access_level !== "internal" ? ` <span class="badge ${d.access_level === "secret" || d.access_level === "restricted" ? "warn" : ""}">${esc(ACCESS_LABELS[d.access_level] || d.access_level)}</span>` : ""}
-          ${query ? "" : `<div class="muted">${esc(d.filename)} ${d.page_count ? "· " + d.page_count + " trang" : ""} ${fmtSize(d.size_bytes)}</div>`}
+      const unread = DOC_UNREAD.has(d.extract_status);
+      const meta = [
+        showUnit ? (d.unit_id ? `<button class="link" onclick="go('units',{unitId:${d.unit_id}, unitTab:'docs'})">${esc(d.unit_name)}</button>` : "Chung") : "",
+        esc(DOC_LABELS[d.doc_type] || d.doc_type),
+        d.page_count ? `${d.page_count} trang` : "",
+        fmtSize(d.size_bytes),
+        fmtDay(d.uploaded_at) ? `${fmtDay(d.uploaded_at)}${d.uploader_name ? ` · ${uploaderHtml(d)}` : ""}` : "",
+        isAiNote(d) && !isAiPdf(d) ?`<span title="${esc(d.extract_note)}">Đọc bằng AI</span>` : "",
+      ].filter(Boolean).join(" · ");
+      const label = query ? hlDoc(`${d.code || ""} ${d.title}`.trim(), query) : `${esc(d.code || "")} ${esc(d.title)}`;
+      return `<tr${unread ? ' class="row-bad"' : ""}>
+        <td class="doc-main">${docHref(d) ? `<a class="doc-title" href="${esc(docHref(d))}" target="_blank" rel="noopener" title="${esc(d.filename)}">` : ""}${label}${docHref(d) ? "</a>" : ""}${d.version ? ` <span class="badge">v${esc(d.version)}</span>` : ""}${d.access_level && d.access_level !== "internal" ? ` <span class="badge ${d.access_level === "secret" || d.access_level === "restricted" ? "warn" : ""}">${esc(ACCESS_LABELS[d.access_level] || d.access_level)}</span>` : ""}
+          <div class="doc-meta">${meta}</div>
           ${query && d.snippet ? `<div class="doc-snippet">${hlDoc(d.snippet, query)}</div>` : ""}
-          ${d.extract_note ? `<div style="color:var(${DOC_UNREAD.has(d.extract_status) ? "--danger" : "--warn"})">${esc(d.extract_note)}</div>` : ""}</td>
-        ${showUnit ? `<td>${d.unit_id ? `<button class="link" onclick="go('units',{unitId:${d.unit_id}, unitTab:'docs'})">${esc(d.unit_name)}</button>` : "Chung"}</td>` : ""}
-        <td>${esc(DOC_LABELS[d.doc_type] || d.doc_type)}</td>
-        <td><span class="badge ${cls}">${lbl}</span></td>
-        <td class="muted">${esc((d.uploaded_at || "").slice(0, 16))}</td>
-        <td style="white-space:nowrap">${isAiPdf(d) ? `<button class="link" data-review-doc="${d.id}">${reviewLabel(d)}</button> · ` : ""}<button class="link" data-view-doc="${d.id}">Xem chữ</button> ·
-          <a class="link" href="/api/documents/${d.id}/file" target="_blank">Tải về</a>
-          ${can("docs_edit") ? `<span class="doc-edit">${query ? `<details class="doc-more"><summary>⋯</summary><div>` : " · "}<button class="link" data-edit-doc="${d.id}">Sửa</button> ·
-          <button class="link" data-reproc="${d.id}">Đọc lại</button> ·
-          <button class="link danger" data-del-doc="${d.id}">Xoá</button>${query ? "</div></details>" : ""}</span>` : ""}</td>
+          ${d.extract_note && !isAiNote(d) ? `<div class="doc-note${unread ? " bad" : ""}">${esc(d.extract_note)}</div>` : ""}</td>
+        <td class="doc-state">${stateCell(d)}</td>
+        <td class="row-actions doc-acts">
+          ${can("docs_download") ? `<a class="row-icon-btn" href="/api/documents/${d.id}/file" target="_blank" title="Tải về" aria-label="Tải về">${icon("download")}</a>` : ""}
+          ${can("docs_edit") || can("docs_delete") ? `<details class="doc-more doc-edit"><summary class="row-icon-btn" title="Thêm" aria-label="Thêm thao tác">⋯</summary><div>${can("docs_edit") ? `<button class="link" data-edit-doc="${d.id}">${icon("edit")}Sửa thông tin</button><button class="link" data-reproc="${d.id}">${icon("reset")}Đọc lại</button>` : ""}${can("docs_delete") ? `<button class="link danger" data-del-doc="${d.id}">${icon("trash")}Xoá</button>` : ""}</div></details>` : ""}</td>
       </tr>`;
     }).join("")}
   </table>`;
 }
+
+// Đóng menu "⋯" của danh sách tài liệu khi bấm ra ngoài
+document.addEventListener("click", (e) => {
+  document.querySelectorAll("details.doc-more[open]").forEach((m) => { if (!m.contains(e.target)) m.open = false; });
+});
 
 function uploadForm(meta, units, unitId) {
   openForm("Tải tài liệu lên", [
@@ -2831,17 +3325,11 @@ function bindDocActions(el, meta, units) {
       { name: "unit_id", label: "Đơn vị chủ quản", type: "select", numeric: true, options: [["", "— Tài liệu chung —"], ...units.map((u) => [u.id, u.name])] },
       { name: "access_level", label: "Độ mật (ai được xem, kể cả qua trợ lý AI)", type: "select", options: d.access_level === "secret" && !meta.levels.some(([k]) => k === "secret") ? [["secret", "Mật (chỉ Ban TGĐ/Admin)"]] : meta.levels },
     ], d, (data) => api(`/api/documents/${d.id}`, { method: "PUT", body: data }));
+    if (d.uploaded_at) {  // thông tin chỉ đọc: ai đăng, lúc nào (không cần sửa)
+      $("#modal-body").insertAdjacentHTML("afterbegin", `<p class="muted">Người đăng: ${d.uploader_name ? uploaderHtml(d) : "không rõ"} · tải lên ${esc(String(d.uploaded_at).slice(0, 16))}</p>`);
+    }
   }));
   el.querySelectorAll("[data-review-doc]").forEach((b) => (b.onclick = () => reviewDoc(b.dataset.reviewDoc, () => render())));
-  el.querySelectorAll("[data-view-doc]").forEach((b) => (b.onclick = async () => {
-    const d = await api(`/api/documents/${b.dataset.viewDoc}`);
-    $("#modal-title").textContent = d.title;
-    $("#modal-body").innerHTML = `<p class="muted">Nội dung AI sẽ đọc (${fmtNum(d.char_count)} ký tự)</p>
-      <div class="process-content" style="max-height:60vh;overflow:auto">${esc(d.content || "Chưa có nội dung – tài liệu chưa được đọc xong hoặc bị lỗi.")}</div>`;
-    $("#modal-form").onsubmit = (e) => { e.preventDefault(); $("#modal").close(); };
-    $("#modal-cancel").onclick = () => $("#modal").close();
-    $("#modal").showModal();
-  }));
 }
 
 function pollIfProcessing(docs) {

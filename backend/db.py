@@ -331,6 +331,11 @@ MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN data_purged_at TEXT",
     # Tài khoản này là nhân viên nào trong danh sách nhân sự (admin gán; mỗi hồ sơ chỉ gán cho một tài khoản)
     "ALTER TABLE users ADD COLUMN employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL",
+    # Tự đăng ký (xem /api/auth/register): tài khoản chờ admin duyệt, khác với tài khoản bị khoá
+    "ALTER TABLE users ADD COLUMN pending_approval INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN register_note TEXT",  # bản ghi cũ: người đăng ký tự ghi phòng ban/SĐT trong một ô; không đưa cho AI
+    "ALTER TABLE users ADD COLUMN register_unit TEXT",   # phòng ban / công trình người đăng ký chọn hoặc nhập, để admin xác minh; không đưa cho AI
+    "ALTER TABLE users ADD COLUMN register_phone TEXT",  # số máy lẻ nội bộ (không bắt buộc); không đưa cho AI
 ]
 
 
@@ -355,6 +360,14 @@ def init_db() -> None:
         if "access_level" not in {r[1] for r in conn.execute("PRAGMA table_info(documents)")}:
             conn.execute("ALTER TABLE documents ADD COLUMN access_level TEXT NOT NULL DEFAULT 'internal'")
             conn.execute("UPDATE documents SET access_level = 'public' WHERE doc_type = 'website'")
+        # Tách quyền xoá và tải file gốc khỏi docs_edit/docs_view: đúng một lần, giữ nguyên quyền người dùng đang có
+        # (sau đó admin thu hồi từng quyền thì không bị cấp lại).
+        if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+            conn.execute("INSERT OR IGNORE INTO user_permissions (user_id, feature)"
+                         " SELECT user_id, 'docs_delete' FROM user_permissions WHERE feature = 'docs_edit'")
+            conn.execute("INSERT OR IGNORE INTO user_permissions (user_id, feature)"
+                         " SELECT user_id, 'docs_download' FROM user_permissions WHERE feature IN ('docs_view', 'docs_edit')")
+            conn.execute("PRAGMA user_version = 1")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents(owner_id)")
         # mỗi hồ sơ nhân sự chỉ gắn với một tài khoản (tránh hai tài khoản cùng xem được thông tin cá nhân của một người)
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_employee ON users(employee_id) WHERE employee_id IS NOT NULL")

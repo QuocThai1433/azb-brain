@@ -5,6 +5,7 @@ Chạy: .venv\\Scripts\\python -X utf8 -m uvicorn backend.app:app --port 8000
 import json
 import os
 import queue
+import re
 import shutil
 import threading
 import time
@@ -20,7 +21,8 @@ from .db import connect, init_db, row, rows
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
-app = FastAPI(title="AZB Brain")
+# Tài liệu API nằm dưới /api để không trùng đường dẫn giao diện (/docs là trang Tài liệu của app)
+app = FastAPI(title="AZB Brain", docs_url="/api/docs", redoc_url="/api/redoc", openapi_url="/api/openapi.json")
 
 # Các cột được phép ghi qua API, theo bảng
 WRITABLE = {
@@ -36,7 +38,7 @@ WRITABLE = {
 TOUCH_UPDATED = {"processes", "targets"}
 # Bảng chỉ admin/ceo được ghi; các bảng còn lại ghi theo phạm vi đơn vị (manager sửa được đơn vị mình)
 EXEC_ONLY_TABLES = {"employees"}
-PUBLIC_API = {"/api/auth/state", "/api/auth/login", "/api/auth/setup"}
+PUBLIC_API = {"/api/auth/state", "/api/auth/login", "/api/auth/setup", "/api/auth/register", "/api/auth/units"}
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "SAMEORIGIN",  # trang xem tài liệu nhúng cùng gốc; chặn trang ngoài nhúng AZB Brain
@@ -52,6 +54,7 @@ def _startup() -> None:
     init_db()
     documents.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
+        documents.relink_uploads(conn)  # data chép từ máy khác: trỏ lại file trong data/uploads
         _backfill_history_labels(conn)
         documents.sync_ai_index(conn)  # dựng sẵn chỉ mục tìm kiếm cho trợ lý AI (lần đầu ~2 giây, sau đó chỉ cập nhật phần đổi)
         empty = conn.execute("SELECT COUNT(*) FROM units").fetchone()[0] == 0
@@ -129,11 +132,12 @@ def auth_state(request: Request):
         needs_setup = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
     user = request.state.user
     if user:
-        user = {**user, "can_use_ai": user["role"] in auth.AI_ROLES, "edit_all": user["role"] in auth.EDIT_ALL_ROLES}
+        user = {**user, "can_use_ai": auth.can_use_ai(user), "edit_all": user["role"] in auth.EDIT_ALL_ROLES}
         with connect() as conn:
             if user["role"] == "admin":
                 user["pending_requests"] = conn.execute("SELECT COUNT(*) FROM access_requests WHERE status = 'pending'").fetchone()[0]
                 user["pending_links"] = conn.execute("SELECT COUNT(*) FROM link_requests WHERE status = 'pending'").fetchone()[0]
+                user["pending_accounts"] = conn.execute("SELECT COUNT(*) FROM users WHERE pending_approval = 1").fetchone()[0]
             else:
                 user["profile_notices"] = selfinfo.notice_count(conn, user["id"])  # kết quả duyệt mới mà user chưa xem
                 user["pending_requests"] = conn.execute(
@@ -154,6 +158,74 @@ def auth_setup(req: SetupRequest, request: Request):
     return _login_response(cur.lastrowid, request)
 
 
+USERNAME_RE = re.compile(r"^[a-z0-9._-]{3,32}$")
+REGISTER_MAX_PER_IP = 5      # số yêu cầu đăng ký tối đa của một địa chỉ trong REGISTER_WINDOW giây
+REGISTER_WINDOW = 3600
+REGISTER_MAX_PENDING = 100   # tổng tài khoản chờ duyệt tối đa, chặn gửi hàng loạt làm ngập danh sách của admin
+_register_log: dict[str, list[float]] = {}
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "").split(",")[0].strip()  # sau tunnel/reverse proxy
+    return fwd or (request.client.host if request.client else "?")
+
+
+class RegisterRequest(LoginRequest):
+    full_name: str | None = None
+    unit: str | None = None   # phòng ban / công trình: chọn từ gợi ý hoặc tự gõ nếu chưa có trong danh sách
+    phone: str | None = None  # số máy lẻ nội bộ (không bắt buộc)
+
+
+PHONE_RE = re.compile(r"^[0-9+][0-9 .-]{2,19}$")
+
+
+@app.get("/api/auth/units")
+def auth_units():
+    """Tên đơn vị để gợi ý khi đăng ký: chỉ phòng / ban / công trình, chỉ trả tên và từ khoá tìm kiếm (mã, cách gọi thường ngày như HCNS, CNTT), không trả ID hay số liệu nội bộ."""
+    with connect() as conn:
+        return [{"name": r["name"], "full_name": r["full_name"] or None,
+                 "keywords": f"{r['code']} {analytics.UNIT_ALIASES.get(r['code'], '')}".strip()} for r in conn.execute(
+            "SELECT code, name, full_name FROM units WHERE unit_type IN ('department', 'committee', 'project') AND name != ''"
+            " ORDER BY sort_order, id")]
+
+
+@app.post("/api/auth/register")
+def register(req: RegisterRequest, request: Request):
+    """Người dùng tự đăng ký: tài khoản chờ admin duyệt (active = 0), vai trò viewer, chưa đăng nhập được."""
+    username = req.username.strip().lower()
+    full_name = (req.full_name or "").strip()
+    unit = (req.unit or "").strip()
+    phone = (req.phone or "").strip()
+    if not USERNAME_RE.match(username):
+        raise HTTPException(400, "Tên đăng nhập gồm 3–32 ký tự: chữ không dấu, số, dấu chấm, gạch dưới hoặc gạch ngang")
+    if not full_name:
+        raise HTTPException(400, "Vui lòng nhập họ tên")
+    if not unit:
+        raise HTTPException(400, "Vui lòng chọn hoặc nhập phòng ban / công trình")
+    if len(req.password) < 8:
+        raise HTTPException(400, "Mật khẩu tối thiểu 8 ký tự")
+    if len(full_name) > 100 or len(unit) > 100:
+        raise HTTPException(400, "Họ tên và phòng ban tối đa 100 ký tự")
+    if phone and not PHONE_RE.match(phone):
+        raise HTTPException(400, "Số máy lẻ chỉ gồm chữ số, khoảng trắng, dấu cộng, chấm hoặc gạch ngang (3–20 ký tự)")
+    now, ip = time.time(), _client_ip(request)
+    recent = [t for t in _register_log.get(ip, []) if now - t < REGISTER_WINDOW]
+    if len(recent) >= REGISTER_MAX_PER_IP:
+        raise HTTPException(429, "Bạn đã gửi quá nhiều yêu cầu đăng ký, vui lòng thử lại sau")
+    with connect() as conn:
+        if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+            raise HTTPException(403, "Hệ thống chưa có quản trị viên, hãy tạo tài khoản quản trị trước")
+        if conn.execute("SELECT COUNT(*) FROM users WHERE pending_approval = 1").fetchone()[0] >= REGISTER_MAX_PENDING:
+            raise HTTPException(429, "Đang có quá nhiều yêu cầu chờ duyệt, vui lòng liên hệ quản trị viên")
+        if row(conn, "SELECT id FROM users WHERE username = ?", (username,)):
+            raise HTTPException(400, "Tên đăng nhập đã tồn tại")
+        _register_log[ip] = recent + [now]
+        conn.execute("INSERT INTO users (username, full_name, role, password_hash, active, pending_approval, register_unit, register_phone)"
+                     " VALUES (?,?, 'viewer', ?, 0, 1, ?, ?)",
+                     (username, full_name, auth.hash_password(req.password), unit, phone or None))
+    return {"ok": True}
+
+
 @app.post("/api/auth/login")
 def login(req: LoginRequest, request: Request):
     username = req.username.strip().lower()
@@ -163,10 +235,14 @@ def login(req: LoginRequest, request: Request):
         wait = max(1, int(LOGIN_LOCK_SECONDS - (now - recent[0])))
         raise HTTPException(429, f"Sai mật khẩu quá nhiều lần, thử lại sau {wait // 60 + (1 if wait % 60 else 0)} phút")
     with connect() as conn:
-        u = row(conn, "SELECT * FROM users WHERE username = ? AND active = 1", (username,))
+        u = row(conn, "SELECT * FROM users WHERE username = ?", (username,))
     if not u or not auth.verify_password(req.password, u["password_hash"]):
         _failed_logins[username] = recent + [now]
         raise HTTPException(401, "Sai tên đăng nhập hoặc mật khẩu")
+    if u["pending_approval"]:  # đúng mật khẩu mới báo, để không lộ tài khoản tồn tại
+        raise HTTPException(403, "Tài khoản đang chờ quản trị viên duyệt")
+    if not u["active"]:
+        raise HTTPException(403, "Tài khoản đã bị khoá")
     _failed_logins.pop(username, None)
     return _login_response(u["id"], request)
 
@@ -201,9 +277,9 @@ def change_password(req: PasswordChange, request: Request):
 # ---------- Quản lý tài khoản (admin) ----------
 @app.get("/api/users")
 def list_users(request: Request):
-    auth.require_roles(request, {"admin"})
+    auth.require_roles(request, auth.EDIT_ALL_ROLES)
     with connect() as conn:
-        out = rows(conn, "SELECT u.id, u.username, u.full_name, u.role, u.unit_id, x.name AS unit_name, u.active, u.created_at,"
+        out = rows(conn, "SELECT u.id, u.username, u.full_name, u.role, u.unit_id, x.name AS unit_name, u.active, u.created_at, u.pending_approval, u.register_note, u.register_unit, u.register_phone,"
                          " u.quota_mb, u.employee_id, e.full_name AS employee_name,"
                          " (SELECT COALESCE(SUM(size_bytes), 0) FROM documents d WHERE d.access_level = 'private'"
                          " AND d.owner_id = u.id) AS private_bytes"
@@ -400,6 +476,29 @@ def unlock_user(user_id: int, request: Request):
     return {"ok": True}
 
 
+@app.post("/api/users/{user_id}/approve")
+def approve_user(user_id: int, data: dict, request: Request):
+    """Admin duyệt tài khoản tự đăng ký: gán vai trò, đơn vị và quyền cấp thêm rồi mở khoá. Từ chối = xoá tài khoản."""
+    admin = auth.require_roles(request, {"admin"})
+    role = data.get("role")
+    if role not in auth.ROLES:
+        raise HTTPException(400, "Vai trò không hợp lệ")
+    features = data.get("features") or []
+    if not isinstance(features, list) or any(f not in auth.FEATURES for f in features):
+        raise HTTPException(400, "Quyền không hợp lệ")
+    unit_id = data.get("unit_id") or None
+    with connect() as conn:
+        u = row(conn, "SELECT id, username FROM users WHERE id = ? AND pending_approval = 1", (user_id,))
+        if not u:
+            raise HTTPException(400, "Tài khoản này không ở trạng thái chờ duyệt")
+        conn.execute("UPDATE users SET role = ?, unit_id = ?, active = 1, pending_approval = 0, deactivated_at = NULL WHERE id = ?",
+                     (role, unit_id, user_id))
+        conn.execute("DELETE FROM user_permissions WHERE user_id = ?", (user_id,))
+        conn.executemany("INSERT INTO user_permissions (user_id, feature) VALUES (?,?)", [(user_id, f) for f in set(features)])
+        _log(conn, admin, "approve", "users", user_id, f"{role}; {','.join(sorted(set(features)))}")
+    return {"ok": True}
+
+
 @app.post("/api/users")
 def create_user(data: dict, request: Request):
     admin = auth.require_roles(request, {"admin"})
@@ -464,8 +563,20 @@ def update_user(user_id: int, data: dict, request: Request):
         if "active" in fields:  # đồng hồ 90 ngày giữ dữ liệu khi nghỉ việc: bắt đầu lúc khoá, bỏ khi mở khoá lại
             conn.execute("UPDATE users SET deactivated_at = CASE WHEN active = 0 THEN COALESCE(deactivated_at, datetime('now','localtime'))"
                          " ELSE NULL END WHERE id = ?", (user_id,))
+            if fields["active"] in (1, "1"):  # bật hoạt động cũng coi như duyệt tài khoản tự đăng ký
+                conn.execute("UPDATE users SET pending_approval = 0 WHERE id = ?", (user_id,))
         _log(conn, admin, "update", "users", user_id)
     return {"ok": True}
+
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int, data: dict, request: Request):
+    """Admin/ceo xoá hẳn một tài khoản đã khoá (gõ lại tên đăng nhập để xác nhận). Ghi nhật ký trước khi xoá."""
+    actor = auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    with connect() as conn:
+        result = offboarding.delete_account(conn, actor["id"], user_id, str(data.get("confirm") or ""))
+        _log(conn, actor, "delete_user", "users", user_id, json.dumps(result, ensure_ascii=False))
+    return {"ok": True, **result}
 
 
 # ---------- Xin cấp quyền truy cập ----------
@@ -725,7 +836,7 @@ class ProposalUpdate(BaseModel):
 @app.get("/api/proposals")
 def list_proposals(request: Request, status: str | None = None):
     """Đề xuất cải tiến. Ban TGĐ / quản trị xem tất cả; người khác chỉ xem đề xuất do mình tạo."""
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     where, args = [], []
     if user["role"] not in auth.EDIT_ALL_ROLES:
         where.append("p.created_by = ?")
@@ -741,7 +852,7 @@ def list_proposals(request: Request, status: str | None = None):
 
 @app.post("/api/proposals")
 def create_proposal(req: ProposalIn, request: Request):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     title = req.title.strip()[:200]
     if not title:
         raise HTTPException(400, "Thiếu tiêu đề đề xuất")
@@ -1144,14 +1255,25 @@ def list_documents(request: Request, unit_id: int | None = None):
     user = auth.current_user(request)
     sql = ("SELECT d.id, d.unit_id, u.name AS unit_name, d.process_id, d.title, d.doc_type, d.code, d.version, d.filename,"
            " d.size_bytes, d.page_count, d.char_count, d.extract_status, d.extract_note, d.uploaded_at, d.access_level,"
-           " (SELECT COUNT(*) FROM doc_page_review r WHERE r.doc_id = d.id) AS reviewed_pages"
-           " FROM documents d LEFT JOIN units u ON u.id = d.unit_id")
+           " (SELECT COUNT(*) FROM doc_page_review r WHERE r.doc_id = d.id) AS reviewed_pages,"
+           " (d.extract_status = 'ok' AND d.extract_note IS NOT NULL AND LOWER(d.stored_path) LIKE '%.pdf' AND d.doc_type != 'website') AS ai_read,"
+           # Người tải lên chỉ trả về cho file chưa đọc. Tên và đơn vị lấy từ hồ sơ nhân sự đã liên kết (nếu có) để phân biệt người trùng tên.
+           " CASE WHEN d.extract_status IN ('failed', 'needs_ocr') THEN COALESCE(ue.full_name, uu.full_name, uu.username, '—') END AS uploader_name,"
+           " CASE WHEN d.extract_status IN ('failed', 'needs_ocr') THEN ue.id END AS uploader_employee_id,"
+           " CASE WHEN d.extract_status IN ('failed', 'needs_ocr') THEN uun.name END AS uploader_unit"
+           " FROM documents d LEFT JOIN units u ON u.id = d.unit_id LEFT JOIN users uu ON uu.id = d.uploaded_by"
+           " LEFT JOIN employees ue ON ue.id = uu.employee_id LEFT JOIN units uun ON uun.id = ue.unit_id")
     with connect() as conn:
         where, params = access.doc_scope(conn, user)
         where += " AND d.access_level != 'private'"  # file đính kèm chat nằm ở kho riêng, không lẫn vào thư viện
         if unit_id:
-            return rows(conn, sql + f" WHERE {where} AND d.unit_id = ? ORDER BY d.code, d.title", [*params, unit_id])
-        return rows(conn, sql + f" WHERE {where} ORDER BY d.uploaded_at DESC", params)
+            docs = rows(conn, sql + f" WHERE {where} AND d.unit_id = ? ORDER BY d.code, d.title", [*params, unit_id])
+        else:
+            docs = rows(conn, sql + f" WHERE {where} ORDER BY d.uploaded_at DESC", params)
+        can_review = documents.reviewable_ids(conn)
+        for d in docs:
+            d["can_review"] = d["id"] in can_review
+        return docs
 
 
 @app.get("/api/documents/meta")
@@ -1163,10 +1285,10 @@ def documents_meta(request: Request):
 
 
 @app.get("/api/documents/search")
-def search_documents(request: Request, q: str, unit_id: int | None = None):
+def search_documents(request: Request, q: str, unit_id: int | None = None, content: bool = False):
     user = auth.require_permission(request, "docs_view")
     with connect() as conn:
-        return documents.search_docs(conn, q, limit=30, unit_id=unit_id,
+        return documents.search_docs(conn, q, limit=30, unit_id=unit_id, in_content=content,
                                      allowed_ids=access.visible_doc_ids(conn, user, include_private=False))
 
 
@@ -1258,6 +1380,11 @@ def get_document(doc_id: int, request: Request):
                 (doc_id,))
         if d and not access.can_view_doc(conn, user, doc_id):
             d = None  # không thấy = báo không tìm thấy (không lộ tài liệu có tồn tại hay không)
+        if d and "docs_edit" in user["permissions"] and d["uploaded_by"]:
+            # Người đăng chỉ trả về cho người sửa được tài liệu (form Sửa); tên và đơn vị lấy từ hồ sơ nhân sự như danh sách
+            d.update(row(conn, "SELECT uu.employee_id AS uploader_employee_id, COALESCE(ue.full_name, uu.full_name, uu.username) AS uploader_name,"
+                               " uun.name AS uploader_unit FROM users uu LEFT JOIN employees ue ON ue.id = uu.employee_id"
+                               " LEFT JOIN units uun ON uun.id = ue.unit_id WHERE uu.id = ?", (d["uploaded_by"],)) or {})
     if not d:
         raise HTTPException(404, "Không tìm thấy tài liệu")
     d.pop("stored_path")
@@ -1267,6 +1394,8 @@ def get_document(doc_id: int, request: Request):
 @app.get("/api/documents/{doc_id}/file")
 def download_document(doc_id: int, request: Request, inline: bool = False):
     user = auth.require_permission(request, "docs_view")
+    if not inline:  # xem trực tiếp trên web chỉ cần docs_view; tải file về máy cần quyền riêng
+        auth.require_permission(request, "docs_download")
     with connect() as conn:
         d = row(conn, "SELECT filename, title, stored_path, mime, content FROM documents WHERE id = ?", (doc_id,))
         if d and not access.can_view_doc(conn, user, doc_id):
@@ -1316,8 +1445,11 @@ def review_pages(doc_id: int, request: Request):
         d, path = _review_pdf(conn, user, doc_id)
         pages = documents.split_pages(d["content"], d["page_count"])
         done = {r["page_no"]: r["status"] for r in rows(conn, "SELECT page_no, status FROM doc_page_review WHERE doc_id = ?", (doc_id,))}
-    if not pages:
-        raise HTTPException(400, "Văn bản của tài liệu này không có đánh dấu trang nên chưa đối chiếu từng trang được")
+    if not pages:  # văn bản thiếu đánh dấu trang: đối chiếu cả file, một ô chữ duy nhất
+        with pymupdf.open(path) as pdf:
+            total = len(pdf)
+        return {"id": doc_id, "title": d["title"], "total": total, "reviewed": len(done), "whole": True,
+                "text": d["content"], "status": ("edited" if "edited" in done.values() else "verified") if len(done) >= total else None}
     with pymupdf.open(path) as pdf:
         total = len(pdf)
         try:
@@ -1340,6 +1472,35 @@ def review_page_image(doc_id: int, page_no: int, request: Request):
             raise HTTPException(404, "Không có trang này")
         png = pdf[page_no - 1].get_pixmap(matrix=pymupdf.Matrix(1.8, 1.8)).tobytes("png")
     return Response(png, media_type="image/png", headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"})
+
+
+@app.put("/api/documents/{doc_id}/review")
+def review_save_whole(doc_id: int, data: dict, request: Request):
+    """Đối chiếu cả file (văn bản không có đánh dấu trang): xác nhận đúng (không gửi text) hoặc gửi bản đã sửa."""
+    user = auth.require_permission(request, "docs_edit")
+    text = data.get("text")
+    if text is not None and not isinstance(text, str):
+        raise HTTPException(400, "Nội dung không hợp lệ")
+    with connect() as conn:
+        d, _ = _review_pdf(conn, user, doc_id, write=True)
+        auth.check_unit_write(conn, user, d["unit_id"])
+        if documents.split_pages(d["content"], d["page_count"]):
+            raise HTTPException(400, "Tài liệu này đã có đánh dấu trang, hãy đối chiếu từng trang")
+        status = documents.save_whole_review(conn, doc_id, user["id"], text)
+        _log(conn, user, "review", "documents", doc_id, f"cả file: {status}")
+    return {"ok": True, "status": status}
+
+
+@app.delete("/api/documents/{doc_id}/review")
+def review_undo_whole(doc_id: int, request: Request):
+    """Bỏ dấu đã đối chiếu của cả file. Chữ đã sửa trước đó vẫn giữ nguyên."""
+    user = auth.require_permission(request, "docs_edit")
+    with connect() as conn:
+        d, _ = _review_pdf(conn, user, doc_id, write=True)
+        auth.check_unit_write(conn, user, d["unit_id"])
+        conn.execute("DELETE FROM doc_page_review WHERE doc_id = ?", (doc_id,))
+        _log(conn, user, "review_undo", "documents", doc_id, "cả file")
+    return {"ok": True}
 
 
 @app.put("/api/documents/{doc_id}/review/{page_no}")
@@ -1403,9 +1564,20 @@ def reprocess_document(doc_id: int, request: Request, background: BackgroundTask
     return {"ok": True}
 
 
+@app.post("/api/documents/reprocess-unread")
+def reprocess_unread(request: Request, background: BackgroundTasks, include_ocr: bool = False):
+    user = auth.require_permission(request, "docs_edit")
+    with connect() as conn:
+        queue = documents.reprocess_candidates(conn, user, include_ocr)
+        conn.executemany("UPDATE documents SET extract_status = 'pending' WHERE id = ?", [(doc_id,) for doc_id, _ in queue])
+    if queue:
+        background.add_task(documents.reprocess_many, queue)
+    return {"queued": len(queue)}
+
+
 @app.delete("/api/documents/{doc_id}")
 def delete_document(doc_id: int, request: Request):
-    user = auth.require_permission(request, "docs_edit")
+    user = auth.require_permission(request, "docs_delete")
     with connect() as conn:
         d = access.check_doc_write(conn, user, doc_id)
         auth.check_unit_write(conn, user, d["unit_id"])
@@ -1431,7 +1603,7 @@ def _private_row(conn, user: dict, doc_id: int) -> dict:
 
 @app.get("/api/my-files/meta")
 def my_files_meta(request: Request):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     with connect() as conn:
         return {"allowed_ext": sorted(documents.ALLOWED_EXT), "max_mb": documents.MAX_UPLOAD_BYTES // (1024 * 1024),
                 "ocr_available": ai.has_gemini(), "ocr_daily_limit": privatefiles.OCR_DAILY_LIMIT,
@@ -1440,7 +1612,7 @@ def my_files_meta(request: Request):
 
 @app.get("/api/my-files")
 def list_my_files(request: Request):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     with connect() as conn:
         files = rows(conn, "SELECT id, title, filename, size_bytes, page_count, char_count, extract_status, extract_note, uploaded_at"
                            " FROM documents WHERE access_level = 'private' AND owner_id = ? ORDER BY uploaded_at DESC, id DESC",
@@ -1450,7 +1622,7 @@ def list_my_files(request: Request):
 
 @app.post("/api/my-files")
 async def upload_my_file(request: Request, background: BackgroundTasks, file: UploadFile = File(...)):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     ext = Path(file.filename or "").suffix.lower()
     if ext not in documents.ALLOWED_EXT:
         raise HTTPException(400, f"Chỉ nhận các định dạng: {', '.join(sorted(documents.ALLOWED_EXT))}")
@@ -1499,7 +1671,7 @@ def download_my_file(doc_id: int, request: Request, inline: bool = False):
 @app.post("/api/my-files/{doc_id}/read")
 def read_my_file(doc_id: int, request: Request):
     """Đọc (OCR/gỡ băng) hoặc đọc lại một file riêng của mình, tính vào trần lượt đọc mỗi ngày."""
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     with connect() as conn:
         d = privatefiles.get_file(conn, user, doc_id)
         if d["owner_id"] != user["id"]:
@@ -1570,14 +1742,14 @@ def _memory_state(conn, user_id: int) -> dict:
 
 @app.get("/api/memory")
 def get_memory(request: Request):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     with connect() as conn:
         return _memory_state(conn, user["id"])
 
 
 @app.put("/api/memory/enabled")
 def set_memory_enabled(data: dict, request: Request):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     with connect() as conn:
         memory.set_enabled(conn, user["id"], bool(data.get("enabled")))
         _log(conn, user, "memory_on" if data.get("enabled") else "memory_off", "users", user["id"])
@@ -1587,7 +1759,7 @@ def set_memory_enabled(data: dict, request: Request):
 @app.post("/api/memory")
 def add_memory_note(data: dict, request: Request):
     """Người dùng tự viết một ghi chú cho AI (dùng được ngay)."""
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     with connect() as conn:
         result = memory.add_note(conn, user["id"], str(data.get("text") or ""), source="user")
     if result == "rejected":
@@ -1601,7 +1773,7 @@ def add_memory_note(data: dict, request: Request):
 
 @app.put("/api/memory/{note_id}")
 def edit_memory_note(note_id: int, data: dict, request: Request):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     text = memory.clean(str(data.get("text") or ""))
     if not text:
         raise HTTPException(400, "Ghi chú không hợp lệ: cần 8–160 ký tự và không chứa thông tin nhạy cảm.")
@@ -1615,7 +1787,7 @@ def edit_memory_note(note_id: int, data: dict, request: Request):
 
 @app.delete("/api/memory/{note_id}")
 def delete_memory_note(note_id: int, request: Request):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     with connect() as conn:
         _note(conn, user["id"], note_id)
         conn.execute("DELETE FROM user_memories WHERE id = ?", (note_id,))
@@ -1624,7 +1796,7 @@ def delete_memory_note(note_id: int, request: Request):
 
 @app.delete("/api/memory")
 def clear_memory(request: Request):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     with connect() as conn:
         conn.execute("DELETE FROM user_memories WHERE user_id = ?", (user["id"],))
         _log(conn, user, "memory_clear", "users", user["id"])
@@ -1634,7 +1806,7 @@ def clear_memory(request: Request):
 @app.post("/api/memory/refresh")
 def refresh_memory(request: Request):
     """Trích ghi chú ngay từ các đoạn chat chưa xử lý (không chờ đoạn chat dừng)."""
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     guard.check_ai_rate(user["id"])
     with connect() as conn:
         if not conn.execute("SELECT memory_on FROM users WHERE id = ?", (user["id"],)).fetchone()[0]:
@@ -1702,7 +1874,7 @@ def _conv_title(text: str) -> str:
 
 @app.get("/api/conversations")
 def list_conversations(request: Request):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     with connect() as conn:
         return rows(conn, "SELECT id, title, created_at, updated_at FROM conversations WHERE user_id = ?"
                           " ORDER BY updated_at DESC, id DESC", (user["id"],))
@@ -1710,7 +1882,7 @@ def list_conversations(request: Request):
 
 @app.get("/api/conversations/{conv_id}")
 def get_conversation(conv_id: int, request: Request):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     with connect() as conn:
         conv = _own_conversation(conn, user, conv_id)
         msgs = rows(conn, "SELECT role, content, tools_used, created_at FROM chat_messages WHERE conversation_id = ?"
@@ -1728,7 +1900,7 @@ def get_conversation(conv_id: int, request: Request):
 
 @app.put("/api/conversations/{conv_id}")
 def rename_conversation(conv_id: int, data: dict, request: Request):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     title = _conv_title(str(data.get("title") or ""))
     if not title:
         raise HTTPException(400, "Tên đoạn chat không được trống")
@@ -1741,7 +1913,7 @@ def rename_conversation(conv_id: int, data: dict, request: Request):
 @app.get("/api/conversations/{conv_id}/files")
 def conversation_files(conv_id: int, request: Request):
     """File đính kèm của đoạn chat: để hỏi người dùng có xoá luôn khi xoá đoạn chat không."""
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     with connect() as conn:
         _own_conversation(conn, user, conv_id)
         return privatefiles.conversation_files(conn, user["id"], conv_id)
@@ -1750,7 +1922,7 @@ def conversation_files(conv_id: int, request: Request):
 @app.delete("/api/conversations/{conv_id}")
 def delete_conversation(conv_id: int, request: Request, delete_files: bool = False):
     """Xoá đoạn chat. delete_files=true: xoá luôn các file đính kèm chỉ dùng trong đoạn chat này (file còn đoạn chat khác dùng được giữ lại)."""
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     removed = 0
     with connect() as conn:
         _own_conversation(conn, user, conv_id)
@@ -1765,7 +1937,7 @@ def delete_conversation(conv_id: int, request: Request, delete_files: bool = Fal
 
 @app.post("/api/chat")
 def chat(req: ChatRequest, request: Request, background: BackgroundTasks):
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     return _run_chat(req, user, background)
 
 
@@ -1773,7 +1945,7 @@ def chat(req: ChatRequest, request: Request, background: BackgroundTasks):
 def chat_stream(req: ChatRequest, request: Request):
     """Như /api/chat nhưng trả theo luồng SSE: mỗi công cụ AI gọi được báo ngay ("tool"), cuối cùng là "done" hoặc "error".
     Giữ cách trả lời cuối nguyên vẹn; chỉ thêm tiến trình để người hỏi không phải nhìn khung chờ suốt 1–2 phút."""
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     events: queue.Queue = queue.Queue()
     background = BackgroundTasks()  # tác vụ nền (trích bộ nhớ) chạy sau khi luồng kết thúc
 
@@ -1863,7 +2035,7 @@ def _run_chat(req: ChatRequest, user: dict, background: BackgroundTasks, progres
 @app.get("/api/exports/{token}")
 def download_export(token: str, request: Request):
     """Tải file Word/Excel/PowerPoint do trợ lý AI tạo; chỉ người đã yêu cầu mới tải được, giữ 7 ngày."""
-    user = auth.require_roles(request, auth.AI_ROLES)
+    user = auth.require_ai(request)
     path = export.find(user["id"], token)
     if not path:
         raise HTTPException(404, "File không còn (chỉ lưu 7 ngày) hoặc không thuộc tài khoản của bạn. Hãy nhờ trợ lý tạo lại.")
@@ -1910,4 +2082,12 @@ app.mount("/static", StaticFiles(directory=FRONTEND), name="static")
 
 @app.get("/")
 def index():
+    return FileResponse(FRONTEND / "index.html")
+
+
+# Đường dẫn giao diện (/units/5/org, /people/12...) do JS xử lý: mọi đường dẫn không phải API/tệp đều trả index.html
+@app.get("/{path:path}", include_in_schema=False)
+def spa_fallback(path: str):
+    if path.split("/")[0] in ("api", "static") or "." in path.rsplit("/", 1)[-1]:
+        return JSONResponse({"detail": "Không tìm thấy"}, status_code=404)  # không để lỗi API/tệp thiếu biến thành trang HTML
     return FileResponse(FRONTEND / "index.html")

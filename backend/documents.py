@@ -8,7 +8,9 @@ import sqlite3
 import unicodedata
 from pathlib import Path
 
-from . import guard
+from fastapi import HTTPException
+
+from . import access, auth, guard
 from .db import DB_PATH, connect, row, rows
 
 UPLOAD_DIR = DB_PATH.parent / "uploads"
@@ -461,6 +463,41 @@ def process_document(doc_id: int, use_ocr: bool = True) -> None:
         )
 
 
+QUOTA_MARKERS = ("429", "quá tải")  # lỗi hết hạn mức / Gemini quá tải: đọc tiếp cũng sẽ lỗi y hệt
+
+
+def reprocess_candidates(conn: sqlite3.Connection, user: dict, include_ocr: bool = False) -> list[tuple[int, str]]:
+    """Tài liệu user được phép đọc lại hàng loạt: file lỗi (failed), thêm file chưa đọc được bằng OCR nếu include_ocr.
+    Trả về (id, trạng thái cũ) để khi dừng giữa chừng còn trả đúng trạng thái cho các file chưa đọc."""
+    statuses = ("failed", "needs_ocr") if include_ocr else ("failed",)
+    where, params = access.doc_scope(conn, user)
+    found = rows(conn, "SELECT d.id, d.extract_status, d.unit_id, d.access_level FROM documents d"
+                       f" WHERE {where} AND d.access_level != 'private' AND d.extract_status IN ({','.join('?' * len(statuses))})"
+                       " ORDER BY d.id", [*params, *statuses])
+    out = []
+    for d in found:
+        try:
+            access.check_doc_write(conn, user, d["id"])
+            auth.check_unit_write(conn, user, d["unit_id"])
+        except HTTPException:
+            continue  # không có quyền với file này: bỏ qua, không báo lỗi cả lô
+        out.append((d["id"], d["extract_status"]))
+    return out
+
+
+def reprocess_many(queue: list[tuple[int, str]]) -> None:
+    """Đọc lại nối tiếp (chạy nền). Gặp hết hạn mức AI thì dừng và trả các file còn lại về trạng thái cũ để đọc lại sau."""
+    for i, (doc_id, old_status) in enumerate(queue):
+        process_document(doc_id)
+        with connect() as conn:
+            cur = row(conn, "SELECT extract_status, extract_note FROM documents WHERE id = ?", (doc_id,)) or {}
+            if cur.get("extract_status") == "failed" and any(m in (cur.get("extract_note") or "") for m in QUOTA_MARKERS):
+                for rest_id, rest_status in queue[i + 1:]:
+                    conn.execute("UPDATE documents SET extract_status = ? WHERE id = ? AND extract_status = 'pending'",
+                                 (rest_status, rest_id))
+                return
+
+
 # ---------------- Đối chiếu từng trang với bản gốc ----------------
 PAGE_MARKER = re.compile(r"^\s*-{2,}\s*Trang\s+(\d+)\s*-{2,}\s*$", re.M | re.I)
 
@@ -480,6 +517,58 @@ def split_pages(content: str, page_count: int | None) -> dict[int, str]:
         prev = n
         pages[n + offset] = content[m.end():end].strip()
     return pages
+
+
+# PDF do AI đọc: chỉ nhánh OCR (_ocr_pdf_with_ai) mới đặt ghi chú cho PDF 'ok'; PDF có lớp chữ để note = NULL.
+# Nhận diện theo cấu trúc này, không theo chữ trong ghi chú (ghi chú có thể viết khác nhau qua các phiên bản).
+def relink_uploads(conn: sqlite3.Connection) -> int:
+    """Đường dẫn file lưu tuyệt đối nên hỏng khi chép dữ liệu sang máy/thư mục khác: file không còn ở stored_path nhưng
+    có trong UPLOAD_DIR cùng tên (`<id>_<tên>`) thì trỏ lại. Chạy lại nhiều lần vẫn an toàn. Trả về số bản ghi đã sửa."""
+    fixed = 0
+    for d in rows(conn, "SELECT id, stored_path FROM documents WHERE stored_path IS NOT NULL AND stored_path != ''"):
+        old = d["stored_path"]
+        if Path(old).is_file():
+            continue
+        name = re.split(r"[\\/]", old)[-1]  # đường dẫn Windows của máy khác vẫn tách được trên mọi hệ điều hành
+        new = UPLOAD_DIR / name
+        if name and new.is_file():
+            conn.execute("UPDATE documents SET stored_path = ? WHERE id = ?", (str(new), d["id"]))
+            fixed += 1
+    return fixed
+
+
+AI_READ_PDF_SQL = ("extract_status = 'ok' AND extract_note IS NOT NULL AND lower(stored_path) LIKE '%.pdf'"  # cùng tiêu chí đuôi file với API đối chiếu
+                   " AND doc_type != 'website'")  # nội dung website đã chuẩn, không cần đối chiếu
+
+
+def reviewable_ids(conn: sqlite3.Connection) -> set[int]:
+    """PDF đọc bằng AI mà mở được màn đối chiếu: còn file PDF gốc. Văn bản thiếu đánh dấu trang vẫn đối chiếu được
+    theo cả file (cùng điều kiện với API đối chiếu)."""
+    out = set()
+    for d in rows(conn, f"SELECT id, stored_path FROM documents WHERE {AI_READ_PDF_SQL} AND content IS NOT NULL"):
+        path = Path(d["stored_path"] or "")
+        if path.suffix.lower() == ".pdf" and path.is_file():
+            out.add(d["id"])
+    return out
+
+
+def save_whole_review(conn: sqlite3.Connection, doc_id: int, user_id: int, text: str | None) -> str:
+    """Đối chiếu cả file khi văn bản không có đánh dấu trang. text=None hoặc giống bản cũ → xác nhận đúng; khác → thay toàn bộ
+    văn bản và đánh chỉ mục lại. Mọi trang của PDF được ghi là đã đối chiếu. Trả về 'verified' hoặc 'edited'."""
+    d = row(conn, "SELECT content, page_count FROM documents WHERE id = ?", (doc_id,))
+    status = "verified"
+    if text is not None and text.strip() != (d["content"] or "").strip():
+        status = "edited"
+        content = text.strip()
+        conn.execute("DELETE FROM doc_chunks WHERE doc_id = ?", (doc_id,))
+        for i, (pn, t) in enumerate(chunk([(None, content)])):
+            conn.execute("INSERT INTO doc_chunks (text, doc_id, chunk_no, page) VALUES (?,?,?,?)", (t, doc_id, i, pn))
+        conn.execute("UPDATE documents SET content = ?, char_count = ? WHERE id = ?", (content, len(content), doc_id))
+    for n in range(1, (d["page_count"] or 1) + 1):
+        conn.execute("INSERT INTO doc_page_review (doc_id, page_no, status, reviewed_by) VALUES (?,?,?,?) "
+                     "ON CONFLICT(doc_id, page_no) DO UPDATE SET status = excluded.status, reviewed_by = excluded.reviewed_by,"
+                     " reviewed_at = datetime('now','localtime')", (doc_id, n, status, user_id))
+    return status
 
 
 def save_page_review(conn: sqlite3.Connection, doc_id: int, page_no: int, user_id: int, text: str | None) -> str:
@@ -577,9 +666,10 @@ _WORDSET_CACHE: dict = {}
 
 
 def search_docs(conn: sqlite3.Connection, q: str, limit: int = 30, unit_id: int | None = None,
-                allowed_ids: set[int] | None = None) -> list[dict]:
-    """Tìm tài liệu theo tên (mã + tiêu đề + tên file) và nội dung. Khớp tên xếp trước, nội dung sau;
-    kèm `snippet` là đoạn trích quanh chỗ khớp. Từ gõ có dấu thì khớp đúng dấu, gõ không dấu thì khớp mọi dấu."""
+                allowed_ids: set[int] | None = None, in_content: bool = False) -> list[dict]:
+    """Tìm tài liệu theo tên (mã + tiêu đề + tên file); `in_content=True` thì tìm thêm trong nội dung.
+    Khớp tên xếp trước, nội dung sau; kèm `snippet` là đoạn trích quanh chỗ khớp.
+    Từ gõ có dấu thì khớp đúng dấu, gõ không dấu thì khớp mọi dấu."""
     terms = _terms(q)
     if not terms:
         return []
@@ -605,7 +695,7 @@ def search_docs(conn: sqlite3.Connection, q: str, limit: int = 30, unit_id: int 
         n_fold, n_raw = _WORDSET_CACHE[nk]
         name_ok = _matches(terms, n_fold, n_raw)
         in_name = all(name_ok)
-        in_content = False
+        hit_content = False
         if not in_name and concepts:
             padded = _title_padded(d)
             lv = [_level(c, padded) for c in concepts]
@@ -615,17 +705,17 @@ def search_docs(conn: sqlite3.Connection, q: str, limit: int = 30, unit_id: int 
                 d["_content"] = ""
                 by_related.append((-sum(lv) / len(concepts), d))
                 continue
-        if not in_name and content:
-            ck = (d["id"], len(content), d["uploaded_at"])
+        if in_content and not in_name and content:
+            ck =(d["id"], len(content), d["uploaded_at"])
             if ck not in _WORDSET_CACHE:  # chuẩn hoá cả nội dung rất tốn: làm 1 lần, các lần gõ sau dùng lại
                 _WORDSET_CACHE[ck] = _word_sets(content)
             c_fold, c_raw = _WORDSET_CACHE[ck]
-            in_content = all(a or b for a, b in zip(name_ok, _matches(terms, c_fold, c_raw)))
-        if in_name or in_content:
+            hit_content = all(a or b for a, b in zip(name_ok, _matches(terms, c_fold, c_raw)))
+        if in_name or hit_content:
             seen.add(key)
             d["in_name"] = in_name
             d["_content"] = "" if in_name else content
-            (by_name if in_name else by_content).append(d)
+            (by_name if in_name else by_content).append(d)  # hit_content chỉ có khi in_content=True
     by_related.sort(key=lambda t: t[0])
     out = (by_name + [d for _, d in by_related] + by_content)[:limit]
     for d in out:  # đoạn trích chỉ làm cho các kết quả được hiển thị

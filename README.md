@@ -4,7 +4,7 @@ App quản trị tri thức công ty AZB tích hợp trợ lý AI cho Tổng Gi�
 
 ## Chạy
 1. Copy `.env.example` thành `.env`, điền `GROQ_API_KEY` (trợ lý AI) và `GEMINI_API_KEY` (đọc PDF scan).
-2. Bấm đúp `run.bat` (lần đầu tự tạo môi trường và cài thư viện) → mở http://127.0.0.1:8000
+2. Bấm đúp `scripts\run.bat` (lần đầu tự tạo môi trường và cài thư viện) → mở http://127.0.0.1:8000
 3. Lần đầu mở: tạo tài khoản quản trị, sau đó vào "Tài khoản" để cấp tài khoản cho TGĐ / trưởng đơn vị.
 
 Nạp lại sơ đồ gốc (XOÁ toàn bộ dữ liệu đã nhập): `.venv\Scripts\python -X utf8 -m backend.seed`
@@ -23,7 +23,7 @@ Nhập danh sách nhân sự HCNS (cập nhật hằng tuần, khớp theo mã N
 - `frontend/` – giao diện (HTML/JS thuần, không cần build)
 
 ## Lưu ý
-- Server chỉ nghe ở 127.0.0.1. Muốn cho người khác trong công ty truy cập cần đưa lên máy chủ nội bộ có HTTPS. Không dùng `run-lan.bat` cho dữ liệu thật vì đi qua http, không mã hoá.
+- Server chỉ nghe ở 127.0.0.1. Muốn cho người khác trong công ty truy cập cần đưa lên máy chủ nội bộ có HTTPS. Không dùng `scripts\run-lan.bat` cho dữ liệu thật vì đi qua http, không mã hoá.
 - Trợ lý AI đọc được toàn bộ dữ liệu nên chỉ cấp cho vai trò Quản trị và Ban TGĐ.
 - Sao lưu: copy cả thư mục `data/` (database + file gốc).
 - Mục có nhãn "Cần xác nhận": tên viết tắt trên sơ đồ hoặc giải nghĩa viết tắt phòng ban do AI đoán – cần HCNS xác nhận.
