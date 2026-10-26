@@ -69,7 +69,7 @@ class DbCase(unittest.TestCase):
         # test không được gọi API thật (khoá trong .env sẽ làm luồng nền đọc ảnh/scan gọi ra ngoài và tốn phí)
         self.env = mock.patch.dict("os.environ")
         self.env.start()
-        for key in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        for key in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
             os.environ.pop(key, None)
         self.addCleanup(self.env.stop)
         db.init_db()

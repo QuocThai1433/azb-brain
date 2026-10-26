@@ -1,4 +1,5 @@
-"""Đề xuất cải tiến: người tạo chỉ thấy đề xuất của mình; Ban TGĐ/quản trị xem tất cả và đổi tiến trình; viewer không dùng được."""
+"""Đề xuất cải tiến (API): người tạo chỉ thấy đề xuất của mình; Ban TGĐ/quản trị xem tất cả và đổi tiến trình; viewer không tạo được.
+Quy tắc vòng đời, file đính kèm: xem tests/test_proposal_workflow.py."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,16 +40,18 @@ class ProposalsTest(unittest.TestCase):
         self.assertEqual([p["title"] for p in mine], ["Của A"])
         self.assertEqual(len(self.clients["ceo"].get("/api/proposals").json()), 2)
 
-    def test_viewer_is_refused(self):
-        self.assertEqual(self.clients["viewer"].get("/api/proposals").status_code, 403)
+    def test_viewer_cannot_create_and_sees_nothing(self):
+        self.clients["manager"].post("/api/proposals", json={"title": "Của A"})
+        self.assertEqual(self.clients["viewer"].get("/api/proposals").json(), [])  # chỉ thấy đề xuất của mình / được giao
         self.assertEqual(self.clients["viewer"].post("/api/proposals", json={"title": "x"}).status_code, 403)
 
     def test_only_ceo_changes_status_and_owner(self):
         pid = self.clients["manager"].post("/api/proposals", json={"title": "x"}).json()["id"]
         self.assertEqual(self.clients["manager"].put(f"/api/proposals/{pid}", json={"status": "approved"}).status_code, 403)
-        r = self.clients["ceo"].put(f"/api/proposals/{pid}", json={"status": "in_progress", "owner": "P. HCNS", "note": "Giao HCNS làm"})
+        self.assertEqual(self.clients["manager"].put(f"/api/proposals/{pid}", json={"owner_user_id": 3}).status_code, 403)
+        r = self.clients["ceo"].put(f"/api/proposals/{pid}", json={"owner_user_id": 3, "note": "Giao HCNS làm", "status": "approved"})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual((r.json()["status"], r.json()["owner"], r.json()["note"]), ("in_progress", "P. HCNS", "Giao HCNS làm"))
+        self.assertEqual((r.json()["status"], r.json()["owner_user_id"], r.json()["note"]), ("approved", 3, "Giao HCNS làm"))
 
     def test_invalid_status_and_empty_title_are_refused(self):
         pid = self.clients["manager"].post("/api/proposals", json={"title": "x"}).json()["id"]
@@ -59,12 +62,12 @@ class ProposalsTest(unittest.TestCase):
         ceo, m = self.clients["ceo"], self.clients["manager"]
         pid = m.post("/api/proposals", json={"title": "a"}).json()["id"]
         m.post("/api/proposals", json={"title": "b"})
-        ceo.put(f"/api/proposals/{pid}", json={"status": "done"})
-        done = ceo.get("/api/proposals?status=done").json()
+        ceo.put(f"/api/proposals/{pid}", json={"status": "dropped", "status_note": "Chưa cần"})
+        done = ceo.get("/api/proposals?status=dropped").json()
         self.assertEqual([p["title"] for p in done], ["a"])
 
     def test_missing_proposal_is_404(self):
-        self.assertEqual(self.clients["ceo"].put("/api/proposals/999", json={"status": "done"}).status_code, 404)
+        self.assertEqual(self.clients["ceo"].put("/api/proposals/999", json={"status": "dropped", "status_note": "x"}).status_code, 404)
 
 
 if __name__ == "__main__":

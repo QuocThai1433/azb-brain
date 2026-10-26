@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import access, ai, analytics, auditlog, auth, backup, budget, contacts, documents, export, guard, hr_import, memory, offboarding, privatefiles, selfinfo, semantic, webimport
+from . import access, ai, analytics, auditlog, auth, backup, budget, contacts, documents, export, guard, hr_import, memory, offboarding, opbudget, privatefiles, proposals, selfinfo, semantic, webimport
 from .db import connect, init_db, row, rows
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
@@ -30,7 +30,8 @@ WRITABLE = {
               "sort_order"],
     "employees": ["employee_code", "full_name", "display_name", "email", "phone", "joined_date", "status", "notes", "verified",
                   "job_title", "grade", "labor_group", "unit_id", "hr_department", "hr_division", "birth_date", "contract_term"],
-    "positions": ["unit_id", "title", "title_code", "employee_id", "is_head", "headcount", "notes", "sort_order"],
+    "positions": ["unit_id", "title", "title_code", "employee_id", "is_head", "headcount", "notes", "sort_order",
+                  "reports_to_employee_id"],
     "processes": ["unit_id", "code", "name", "version", "iso_clause", "owner", "related_units", "purpose", "content",
                   "status", "effective_date"],
     "targets": ["unit_id", "period", "metric", "metric_name", "target_value", "actual_value", "unit_label", "notes"],
@@ -142,6 +143,7 @@ def auth_state(request: Request):
                 user["profile_notices"] = selfinfo.notice_count(conn, user["id"])  # kết quả duyệt mới mà user chưa xem
                 user["pending_requests"] = conn.execute(
                     "SELECT COUNT(*) FROM access_requests WHERE user_id = ? AND seen_by_user = 0", (user["id"],)).fetchone()[0]
+            user["proposals_assigned"] = proposals.open_assigned_count(conn, user["id"])  # việc được giao: hiện mục Đề xuất cả khi không có quyền AI
     return {"needs_setup": needs_setup, "user": user, "roles": auth.ROLES}
 
 
@@ -751,8 +753,12 @@ def get_unit(unit_id: int, request: Request):
         doc_where, doc_params = access.doc_scope(conn, user)
         u["documents"] = [] if "docs_view" not in user["permissions"] else rows(
             conn, "SELECT d.id, d.title, d.code, d.version, d.doc_type, d.filename, d.extract_status, d.page_count,"
-                  f" d.uploaded_at, d.access_level FROM documents d WHERE d.unit_id = ? AND {doc_where} ORDER BY d.code, d.title",
-            [unit_id, *doc_params])
+                  " d.unit_id AS owner_unit_id, ou.name AS owner_unit_name, (d.unit_id = ?) AS is_owner,"
+                  " (SELECT GROUP_CONCAT(x.name, ' · ') FROM document_units du JOIN units x ON x.id = du.unit_id"
+                  "   WHERE du.doc_id = d.id AND du.unit_id != ?) AS other_units,"
+                  " d.uploaded_at, d.access_level FROM documents d LEFT JOIN units ou ON ou.id = d.unit_id"
+                  f" WHERE {access.in_unit_sql()} AND {doc_where} ORDER BY d.code, d.title",
+            [unit_id, unit_id, unit_id, unit_id, *doc_params])
         tgt_units = access.target_units(conn, user)  # mục tiêu doanh thu/lợi nhuận: chỉ đơn vị mình quản lý
         if tgt_units is not None and unit_id not in tgt_units:
             u["targets"] = []
@@ -819,9 +825,6 @@ def list_targets(request: Request, unit_id: int | None = None):
         return rows(conn, sql + " ORDER BY t.period DESC, u.sort_order")
 
 
-PROPOSAL_STATUS = {"new": "Mới", "approved": "Đã duyệt", "in_progress": "Đang thực hiện", "done": "Hoàn thành", "dropped": "Không thực hiện"}
-
-
 class ProposalIn(BaseModel):
     title: str
     body: str = ""
@@ -829,55 +832,84 @@ class ProposalIn(BaseModel):
 
 class ProposalUpdate(BaseModel):
     status: str | None = None
-    owner: str | None = None
+    status_note: str | None = None  # lý do / ghi chú kèm lần đổi trạng thái (bắt buộc khi Không thực hiện)
+    owner_user_id: int | None = None
+    due_date: str | None = None
+    priority: str | None = None
     note: str | None = None
 
 
-@app.get("/api/proposals")
-def list_proposals(request: Request, status: str | None = None):
-    """Đề xuất cải tiến. Ban TGĐ / quản trị xem tất cả; người khác chỉ xem đề xuất do mình tạo."""
-    user = auth.require_ai(request)
-    where, args = [], []
-    if user["role"] not in auth.EDIT_ALL_ROLES:
-        where.append("p.created_by = ?")
-        args.append(user["id"])
-    if status in PROPOSAL_STATUS:
-        where.append("p.status = ?")
-        args.append(status)
-    sql = "SELECT p.*, u.full_name AS author FROM proposals p LEFT JOIN users u ON u.id = p.created_by"
-    sql += (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY p.id DESC LIMIT 500"
+@app.get("/api/proposals/meta")
+def proposals_meta(request: Request):
+    user = auth.current_user(request)
     with connect() as conn:
-        return rows(conn, sql, tuple(args))
+        return {"status": proposals.STATUS, "priority": proposals.PRIORITY, "file_kinds": proposals.FILE_KINDS,
+                "allowed_ext": sorted(documents.ALLOWED_EXT), "max_mb": documents.MAX_UPLOAD_BYTES // (1024 * 1024),
+                "assignees": proposals.assignees(conn) if proposals.is_boss(user) else []}
+
+
+@app.get("/api/proposals")
+def list_proposals(request: Request, status: str | None = None, mine: bool = False):
+    """Ban TGĐ / quản trị xem tất cả; người khác chỉ xem đề xuất do mình tạo hoặc được giao."""
+    user = auth.current_user(request)
+    with connect() as conn:
+        return proposals.list_proposals(conn, user, status, mine)
 
 
 @app.post("/api/proposals")
 def create_proposal(req: ProposalIn, request: Request):
     user = auth.require_ai(request)
-    title = req.title.strip()[:200]
-    if not title:
-        raise HTTPException(400, "Thiếu tiêu đề đề xuất")
     with connect() as conn:
-        pid = conn.execute("INSERT INTO proposals (title, body, created_by) VALUES (?, ?, ?)",
-                           (title, req.body.strip()[:8000], user["id"])).lastrowid
-        _log(conn, user, "create", "proposals", pid)
-        return row(conn, "SELECT * FROM proposals WHERE id = ?", (pid,))
+        p = proposals.create(conn, user, req.title, req.body)
+        _log(conn, user, "create", "proposals", p["id"])
+        return p
+
+
+@app.get("/api/proposals/{pid}")
+def get_proposal(pid: int, request: Request):
+    user = auth.current_user(request)
+    with connect() as conn:
+        return proposals.detail(conn, user, pid)
 
 
 @app.put("/api/proposals/{pid}")
 def update_proposal(pid: int, req: ProposalUpdate, request: Request):
-    user = auth.require_roles(request, auth.EDIT_ALL_ROLES)  # chỉ Ban TGĐ / quản trị đổi tiến trình
+    user = auth.current_user(request)  # quyền chi tiết (Ban TGĐ / người phụ trách) kiểm tra trong proposals.update
     fields = req.model_dump(exclude_unset=True)
-    if "status" in fields and fields["status"] not in PROPOSAL_STATUS:
-        raise HTTPException(400, "Trạng thái không hợp lệ")
     with connect() as conn:
-        if not row(conn, "SELECT id FROM proposals WHERE id = ?", (pid,)):
-            raise HTTPException(404, "Không tìm thấy đề xuất")
-        if fields:
-            sets = ", ".join(f"{k} = ?" for k in fields)
-            conn.execute(f"UPDATE proposals SET {sets}, updated_at = datetime('now','localtime') WHERE id = ?",
-                         (*[(v or None) if isinstance(v, str) else v for v in fields.values()], pid))
+        proposals.update(conn, user, pid, fields)
         _log(conn, user, "update", "proposals", pid, ",".join(fields) or None)
-        return row(conn, "SELECT * FROM proposals WHERE id = ?", (pid,))
+        return proposals.detail(conn, user, pid)
+
+
+@app.post("/api/proposals/{pid}/files")
+async def upload_proposal_file(pid: int, request: Request, kind: str = Form("ref"), file: UploadFile = File(...)):
+    user = auth.current_user(request)
+    data = await file.read()
+    with connect() as conn:
+        fid = proposals.add_file(conn, user, pid, kind, file.filename or "file", data)
+        _log(conn, user, "upload", "proposal_files", fid, file.filename)
+        return proposals.detail(conn, user, pid)
+
+
+@app.get("/api/proposals/{pid}/files/{fid}")
+def download_proposal_file(pid: int, fid: int, request: Request):
+    user = auth.current_user(request)
+    with connect() as conn:
+        f = proposals.get_file(conn, user, pid, fid)
+    path = Path(f["stored_path"])
+    if not path.is_file():
+        raise HTTPException(404, "Không tìm thấy file")
+    return FileResponse(path, filename=f["filename"], headers={"X-Content-Type-Options": "nosniff"})
+
+
+@app.delete("/api/proposals/{pid}/files/{fid}")
+def delete_proposal_file(pid: int, fid: int, request: Request):
+    user = auth.current_user(request)
+    with connect() as conn:
+        proposals.delete_file(conn, user, pid, fid)
+        _log(conn, user, "delete", "proposal_files", fid)
+        return proposals.detail(conn, user, pid)
 
 
 HISTORY_NAME_COL = {"units": "name", "employees": "full_name", "positions": "title", "processes": "name",
@@ -1267,12 +1299,17 @@ def list_documents(request: Request, unit_id: int | None = None):
         where, params = access.doc_scope(conn, user)
         where += " AND d.access_level != 'private'"  # file đính kèm chat nằm ở kho riêng, không lẫn vào thư viện
         if unit_id:
-            docs = rows(conn, sql + f" WHERE {where} AND d.unit_id = ? ORDER BY d.code, d.title", [*params, unit_id])
+            docs = rows(conn, sql + f" WHERE {where} AND {access.in_unit_sql()} ORDER BY d.code, d.title",
+                        [*params, unit_id, unit_id])
         else:
             docs = rows(conn, sql + f" WHERE {where} ORDER BY d.uploaded_at DESC", params)
         can_review = documents.reviewable_ids(conn)
+        shared: dict[int, list[dict]] = {}
+        for r in conn.execute("SELECT du.doc_id, u.id, u.name FROM document_units du JOIN units u ON u.id = du.unit_id"):
+            shared.setdefault(r[0], []).append({"id": r[1], "name": r[2]})
         for d in docs:
             d["can_review"] = d["id"] in can_review
+            d["shared_units"] = shared.get(d["id"], [])
         return docs
 
 
@@ -1303,6 +1340,7 @@ async def upload_document(
     code: str = Form(""),
     version: str = Form(""),
     access_level: str = Form(access.DEFAULT_LEVEL),
+    shared_unit_ids: str = Form(""),  # id các đơn vị dùng chung, cách nhau bằng dấu phẩy
 ):
     user = auth.require_permission(request, "docs_edit")
     access.check_level(user, access_level)
@@ -1316,6 +1354,9 @@ async def upload_document(
         if user["role"] == "viewer":
             raise HTTPException(403, "Tài khoản chỉ xem không được tải tài liệu")
         auth.check_unit_write(conn, user, unit_id)
+        extra = [x for x in shared_unit_ids.split(",") if x.strip()]
+        for x in extra:
+            auth.check_unit_write(conn, user, int(x) if x.strip().isdigit() else None)
         cur = conn.execute(
             "INSERT INTO documents (unit_id, title, doc_type, code, version, filename, stored_path, mime, size_bytes, uploaded_by,"
             " access_level) VALUES (?,?,?,?,?,?,'',?,?,?,?)",
@@ -1323,6 +1364,7 @@ async def upload_document(
              code.strip() or None, version.strip() or None, file.filename, file.content_type, len(data), user["id"],
              access_level))
         doc_id = cur.lastrowid
+        access.set_shared_units(conn, doc_id, extra, unit_id)
         path = documents.UPLOAD_DIR / f"{doc_id}_{documents.safe_filename(file.filename)}"
         path.write_bytes(data)
         conn.execute("UPDATE documents SET stored_path = ? WHERE id = ?", (str(path), doc_id))
@@ -1388,6 +1430,8 @@ def get_document(doc_id: int, request: Request):
     if not d:
         raise HTTPException(404, "Không tìm thấy tài liệu")
     d.pop("stored_path")
+    with connect() as conn:
+        d["shared_unit_ids"] = access.shared_unit_ids(conn, doc_id)
     return d
 
 
@@ -1549,6 +1593,11 @@ def update_document(doc_id: int, data: dict, request: Request):
         if fields:
             conn.execute(f"UPDATE documents SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
                          (*fields.values(), doc_id))
+        if "shared_unit_ids" in data:
+            new = {int(x) for x in (data["shared_unit_ids"] or []) if str(x).isdigit()}
+            for x in new - set(access.shared_unit_ids(conn, doc_id)):  # chỉ kiểm quyền với đơn vị mới thêm
+                auth.check_unit_write(conn, user, x)
+            access.set_shared_units(conn, doc_id, new, fields.get("unit_id", d["unit_id"]))
         _log(conn, user, "update", "documents", doc_id)
     return {"ok": True}
 
@@ -2013,9 +2062,17 @@ def _run_chat(req: ChatRequest, user: dict, background: BackgroundTasks, progres
         raise HTTPException(400, f"Câu hỏi quá dài (tối đa {guard.MAX_QUESTION_CHARS} ký tự)")
     guard.check_ai_rate(user["id"])
     with connect() as conn:
-        if over := budget.check(conn, user):
+        if over := budget.reserve(conn, user):  # kiểm tra trần chi tiêu và giữ chỗ (trả lại sau khi ghi nhật ký chi phí)
             raise HTTPException(429, over)
-        history = []
+    try:
+        return _answer_chat(req, user, background, content, progress, on_text)
+    finally:
+        budget.release(user["id"])
+
+
+def _answer_chat(req: ChatRequest, user: dict, background: BackgroundTasks, content: str, progress, on_text) -> dict:
+    history = []
+    with connect() as conn:
         if req.conversation_id:
             _own_conversation(conn, user, req.conversation_id)
             history = rows(conn, "SELECT role, content, tools_used FROM chat_messages WHERE conversation_id = ? ORDER BY id",
@@ -2039,13 +2096,18 @@ def _run_chat(req: ChatRequest, user: dict, background: BackgroundTasks, progres
             (user["id"], req.conversation_id, content[:2000], json.dumps(res.get("tools_used") or []),
              json.dumps(trail["docs_read"]), json.dumps(trail["flags"], ensure_ascii=False), res.get("model"), res.get("error"),
              usage.get("input"), usage.get("output"), usage.get("cache_read"), usage.get("cache_write"), usage.get("cost_usd")))
+    can_see = user["role"] in auth.EDIT_ALL_ROLES
+    with connect() as conn:
+        quota = budget.status(conn, user)
+    # token/tiền của lượt này chỉ quản trị và TGĐ thấy; người dùng thường chỉ thấy phần trăm hạn mức
+    extra = {"quota": quota, **({"usage": {k: usage.get(k) for k in ("input", "output", "cache_read", "cache_write", "cost_usd")}}
+                                if can_see and usage else {})}
     if res.get("error"):  # không lưu lượt lỗi để lần hỏi lại không gửi kèm câu trả lời lỗi cho AI
-        return {**res, "conversation_id": req.conversation_id}
+        return {**res, **extra, "conversation_id": req.conversation_id}
     # câu trả lời AI viết: che số lạ; dấu [[LH:id]] được giữ lại trong lịch sử, số chỉ điền khi hiển thị
     answer = contacts.scrub(res["answer"])
     if trail.get("exports"):  # link tải do máy chủ gắn (AI không được tự viết link; guard.clean_answer đã bỏ link lạ)
         answer += "\n\n" + "\n".join(f"📎 [{e['filename']}](/api/exports/{e['token']})" for e in trail["exports"])
-    can_see = user["role"] in auth.EDIT_ALL_ROLES
     with connect() as conn:
         conv_id = req.conversation_id
         if not conv_id:
@@ -2062,7 +2124,7 @@ def _run_chat(req: ChatRequest, user: dict, background: BackgroundTasks, progres
     with connect() as conn:
         if conn.execute("SELECT memory_on FROM users WHERE id = ?", (user["id"],)).fetchone()[0]:
             background.add_task(memory.sweep, user["id"])  # trích ghi chú từ các đoạn chat trước đã dừng
-    return {**res, "answer": shown, "conversation_id": conv_id, "title": title}
+    return {**res, **extra, "answer": shown, "conversation_id": conv_id, "title": title}
 
 
 @app.get("/api/exports/{token}")
@@ -2081,6 +2143,137 @@ def download_export(token: str, request: Request):
 @app.get("/api/ai/status")
 def ai_status():
     return ai.status()
+
+
+@app.get("/api/ai/quota")
+def ai_quota(request: Request):
+    """Hạn mức AI hôm nay của người đang đăng nhập (phần trăm đã dùng, còn bao lâu thì reset); None nếu không đặt trần."""
+    user = auth.require_ai(request)
+    with connect() as conn:
+        return {"quota": budget.status(conn, user)}
+
+
+@app.get("/api/ai/cost")
+def ai_cost(request: Request, days: int = 7):
+    """Báo cáo chi phí AI theo ngày, người, loại việc (admin và TGĐ)."""
+    auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    with connect() as conn:
+        return budget.report(conn, days)
+
+
+# ---------- Ngân sách hoạt động 2026 (admin và TGĐ) ----------
+class BudgetActualsBody(BaseModel):
+    months: dict[str, float | None]  # "1".."12" -> số tiền; None = xoá số của tháng đó
+
+
+async def _budget_upload(file: UploadFile, exts: tuple[str, ...], suffix_msg: str) -> tuple[bytes, str]:
+    name = file.filename or ""
+    if not name.lower().endswith(exts):
+        raise HTTPException(400, suffix_msg)
+    data = await file.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(413, "File quá lớn (tối đa 10 MB)")
+    return data, name
+
+
+@app.get("/api/budget")
+def budget_dashboard(request: Request, month: int | None = None):
+    auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    with connect() as conn:
+        return opbudget.dashboard(conn, month)
+
+
+@app.put("/api/budget/lines/{code}/actuals")
+def budget_save_actuals(code: str, body: BudgetActualsBody, request: Request):
+    user = auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    with connect() as conn:
+        try:
+            n = opbudget.save_actuals(conn, user["id"], code, body.months)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        name = (row(conn, "SELECT name FROM budget_lines WHERE code=?", (code,)) or {}).get("name", "")
+        _log(conn, user, "budget_actuals", "budget_line", None, f"Cập nhật số chi thực tế {code} ({n} tháng)", label=f"{code} {name}")
+    return {"ok": True, "months": n}
+
+
+class BudgetDecisionBody(BaseModel):
+    kind: str                       # supplement | block | unblock
+    amount: float | None = None     # số tiền duyệt bổ sung (đồng)
+    note: str = ""
+
+
+BUDGET_KIND_LABEL = {"supplement": "Duyệt bổ sung ngân sách", "block": "Chặn phát sinh chi phí", "unblock": "Cho tiếp tục phát sinh chi phí"}
+
+
+@app.post("/api/budget/lines/{code}/decision")
+def budget_decide(code: str, body: BudgetDecisionBody, request: Request):
+    """Ban TGĐ (và quản trị thay mặt) duyệt bổ sung ngân sách, chặn hoặc cho tiếp tục phát sinh chi phí của một hạng mục."""
+    user = auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    with connect() as conn:
+        try:
+            res = opbudget.decide(conn, user["id"], code, body.kind, body.amount, body.note)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        name = (row(conn, "SELECT name FROM budget_lines WHERE code=?", (code,)) or {}).get("name", "")
+        extra = f" {body.amount:,.0f} đ" if body.kind == "supplement" and body.amount else ""
+        _log(conn, user, "budget_decision", "budget_line", None,
+             f"{BUDGET_KIND_LABEL[body.kind]}{extra}" + (f": {body.note.strip()}" if body.note.strip() else ""), label=f"{code} {name}")
+    return res
+
+
+@app.post("/api/budget/actuals/import")
+async def budget_import_actuals(request: Request, file: UploadFile = File(...)):
+    user = auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    data, name = await _budget_upload(file, (".xlsx", ".xlsm", ".csv"), "Cần file .xlsx hoặc .csv")
+    with connect() as conn:
+        try:
+            res = opbudget.import_actuals(conn, user["id"], data, name)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        _log(conn, user, "budget_actuals", "budget_line", None, f"Nhập số chi thực tế từ file {name}: {res['entries']} ô, {res['lines']} hạng mục"
+             + (f"; bỏ qua {len(res['blocked'])} hạng mục đang bị chặn" if res["blocked"] else ""), label=name)
+    return res
+
+
+@app.get("/api/budget/export")
+def budget_export(request: Request, month: int | None = None):
+    user = auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    with connect() as conn:
+        try:
+            data = opbudget.export_xlsx(conn, month)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        m = opbudget.dashboard(conn, month)["as_of"]
+        _log(conn, user, "budget_export", "budget_line", None, f"Xuất báo cáo ngân sách đến tháng {m}")
+    return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="ngan-sach-{opbudget.YEAR}-T{m}.xlsx"'})
+
+
+@app.get("/api/budget/actuals/template")
+def budget_template(request: Request):
+    auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    with connect() as conn:
+        data = opbudget.template_xlsx(conn)
+    return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="chi-thuc-te-2026.xlsx"'})
+
+
+@app.post("/api/budget/plan/import")
+async def budget_import_plan(request: Request, file: UploadFile = File(...)):
+    user = auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    data, name = await _budget_upload(file, (".xls", ".xlsx", ".xlsm"), "Cần file Excel .xls hoặc .xlsx")
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=Path(name).suffix.lower(), delete=False) as tmp:
+        tmp.write(data)
+    try:
+        with connect() as conn:
+            res = opbudget.import_plan(conn, tmp.name)
+            _log(conn, user, "budget_plan_import", "budget_line", None, f"Nhập kế hoạch ngân sách 2026 từ {name}: {res['lines']} hạng mục", label=name)
+        return res
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
 
 
 @app.get("/api/ai/audit")
@@ -2104,7 +2297,16 @@ def ai_usage(request: Request, days: int = 7):
         totals = rows(conn, "SELECT kind, model, COUNT(*) AS calls, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,"
                             " ROUND(SUM(cost_usd), 4) AS cost_usd FROM ai_usage_log WHERE ts >= datetime('now','localtime',?)"
                             " GROUP BY kind, model ORDER BY cost_usd DESC", (since,))
-    return {"totals": totals, "recent": recent}
+        # Chat: tỉ lệ token đọc từ cache cho biết cache có đang giúp tiết kiệm không (thấp + nhiều cache_write = đang tốn thêm)
+        chat = rows(conn, "SELECT model, COUNT(*) AS questions, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,"
+                          " SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens,"
+                          " ROUND(SUM(cost_usd), 4) AS cost_usd FROM ai_query_log WHERE ts >= datetime('now','localtime',?)"
+                          " AND model IS NOT NULL GROUP BY model ORDER BY cost_usd DESC", (since,))
+        for c in chat:
+            seen = (c["input_tokens"] or 0) + (c["cache_read_tokens"] or 0) + (c["cache_write_tokens"] or 0)
+            c["cache_hit_pct"] = round(100 * (c["cache_read_tokens"] or 0) / seen, 1) if seen else None
+            c["avg_cost_usd"] = round((c["cost_usd"] or 0) / c["questions"], 4)
+    return {"totals": totals, "recent": recent, "chat": chat}
 
 
 @app.get("/api/admin/backups")

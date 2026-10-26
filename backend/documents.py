@@ -38,6 +38,12 @@ CHUNK_OVERLAP = 200
 MIN_CHARS_PER_PAGE = 40   # ít hơn mức này coi như trang scan, cần OCR
 SCAN_PAGE_MAX_CHARS = 400  # trang có ảnh và ít chữ hơn mức này coi là trang scan
 OCR_PAGES_PER_CALL = 20
+OCR_PDF_PROMPT = (
+    "Chép lại nguyên văn toàn bộ nội dung tài liệu này sang Markdown (tiếng Việt, giữ đúng dấu). "
+    "Giữ cấu trúc tiêu đề, danh sách, bảng (dạng bảng Markdown), mã tài liệu, số hiệu phiên bản. "
+    "Lưu đồ/sơ đồ: mô tả các bước và mũi tên dưới dạng danh sách đánh số. "
+    "Đánh dấu đầu mỗi trang bằng dòng '--- Trang N ---'. Không tóm tắt, không bình luận."
+)
 
 
 def safe_filename(name: str) -> str:
@@ -239,12 +245,7 @@ def _ocr_pdf_with_ai(path: Path) -> tuple[list[str], str]:
     if not has_anthropic():
         raise RuntimeError("PDF dạng scan – cần khoá Anthropic API để đọc chữ (OCR).")
     claude = client(timeout_s=600)
-    prompt = (
-        "Chép lại nguyên văn toàn bộ nội dung tài liệu này sang Markdown (tiếng Việt, giữ đúng dấu). "
-        "Giữ cấu trúc tiêu đề, danh sách, bảng (dạng bảng Markdown), mã tài liệu, số hiệu phiên bản. "
-        "Lưu đồ/sơ đồ: mô tả các bước và mũi tên dưới dạng danh sách đánh số. "
-        "Đánh dấu đầu mỗi trang bằng dòng '--- Trang N ---'. Không tóm tắt, không bình luận."
-    )
+    prompt = OCR_PDF_PROMPT
     out, notes = [], []
     with pymupdf.open(path) as src:
         total = len(src)
@@ -721,8 +722,8 @@ def search_docs(conn: sqlite3.Connection, q: str, limit: int = 30, unit_id: int 
            " FROM documents d LEFT JOIN units u ON u.id = d.unit_id")
     params: list = []
     if unit_id:
-        sql += " WHERE d.unit_id = ?"
-        params.append(unit_id)
+        sql += f" WHERE {access.in_unit_sql()}"
+        params += [unit_id, unit_id]
     by_name, by_content, by_related, seen = [], [], [], set()
     concepts = _concepts(q)  # khi quên tên file: tên khớp theo cách gọi tương đương ("sơ đồ tổ chức" ~ "sơ đồ điều hành")
     for d in rows(conn, sql + " ORDER BY d.uploaded_at DESC", params):
@@ -933,7 +934,7 @@ def _semantic_extra(conn: sqlite3.Connection, q: str, unit_id: int | None, docs:
         if doc_id in have or doc_id not in docs:
             continue
         d = docs[doc_id]
-        if unit_id and d["unit_id"] not in (unit_id, None):
+        if unit_id and d["unit_id"] and unit_id not in d["unit_ids"]:
             continue
         item = {"doc_id": d["id"], "title": d["title"], "doc_type": DOC_TYPES.get(d["doc_type"], d["doc_type"]),
                 "unit_name": ("Tài liệu riêng của người đang hỏi (đính kèm chat)" if d["access_level"] == "private"
@@ -970,11 +971,16 @@ def ai_search(conn: sqlite3.Connection, q: str, unit_id: int | None = None, limi
                                            " d.extract_status, d.uploaded_at, d.char_count, d.access_level, u.name AS unit_name"
                                            " FROM documents d LEFT JOIN units u ON u.id = d.unit_id")
             if allowed_ids is None or d["id"] in allowed_ids}  # tài liệu ngoài quyền người hỏi không bao giờ vào kết quả
+    for d in docs.values():  # đơn vị chủ quản + các đơn vị dùng chung: lọc theo đơn vị khớp cả hai
+        d["unit_ids"] = {d["unit_id"]} if d["unit_id"] else set()
+    for did, uid in conn.execute("SELECT doc_id, unit_id FROM document_units"):
+        if did in docs:
+            docs[did]["unit_ids"].add(uid)
     internal_intent = any(c["alts"][0] in (("quy", "trinh"), ("quy", "dinh"), ("huong", "dan"), ("bieu", "mau"),
                                            ("ma", "tran", "phan", "cong")) for c in concepts)
 
     def run(unit_filter: int | None) -> list[dict]:
-        allowed = {i for i, d in docs.items() if not unit_filter or d["unit_id"] in (unit_filter, None)}
+        allowed = {i for i, d in docs.items() if not unit_filter or not d["unit_id"] or unit_filter in d["unit_ids"]}
         # 1) đoạn nội dung khớp: tối đa vài đoạn tốt nhất mỗi tài liệu để file lớn không chiếm hết chỗ
         hits: dict[int, list] = {}
         expr = " OR ".join(_fts_expr(c["alts"]) for c in concepts if c["df"])
@@ -1003,7 +1009,7 @@ def ai_search(conn: sqlite3.Connection, q: str, unit_id: int | None = None, limi
             if best is None and title_score == 0:
                 continue
             cover, rank, lv = best if best else (title_score, 0.0, t_lv)
-            final = cover + 0.25 * title_score + (0.05 if unit_filter and d["unit_id"] == unit_filter else 0)
+            final = cover + 0.25 * title_score + (0.05 if unit_filter and unit_filter in d["unit_ids"] else 0)
             if internal_intent and d["doc_type"] == _WEBSITE:
                 final *= 0.8
             scored.append((final, cover, -rank, d, lv, title_score > 0))

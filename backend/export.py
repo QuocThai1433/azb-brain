@@ -420,7 +420,8 @@ def targets_xlsx(progress: dict) -> bytes:
         c.fill = PatternFill("solid", fgColor=BRAND)
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         c.border = border
-    metric = {"doanh_thu": "Doanh thu", "doanh_so": "Doanh số", "loi_nhuan": "Lợi nhuận", "khac": "Chỉ tiêu khác"}
+    metric = {"doanh_so": "Doanh số", "doanh_thu": "Doanh thu", "loi_nhuan": "Lợi nhuận", "dong_tien": "Dòng tiền",
+              "okr_du_an": "OKRs dự án", "khac": "Chỉ tiêu khác"}
     r = 5
     for t in progress.get("items", []):
         tv, av = t.get("target_value"), t.get("actual_value")

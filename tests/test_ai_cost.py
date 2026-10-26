@@ -79,8 +79,8 @@ class MemoryUsesLightModelTest(unittest.TestCase):
             return SimpleNamespace(content=[SimpleNamespace(type="text", text="{}")], usage=None)
 
         client = SimpleNamespace(messages=SimpleNamespace(create=fake_create))
-        with mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "x", "GROQ_API_KEY": ""}), \
-                mock.patch.object(ai, "PROVIDER", "anthropic"), mock.patch.object(ai, "client", return_value=client), \
+        with mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "x"}), \
+                mock.patch.object(ai, "client", return_value=client), \
                 mock.patch.object(ai, "log_usage"), mock.patch.dict(ai._cooldown, clear=True):
             self.assertEqual(ai.complete("s", "p", light_first=True), "{}")
             self.assertEqual(tried, [ai.CHAT_MODEL])

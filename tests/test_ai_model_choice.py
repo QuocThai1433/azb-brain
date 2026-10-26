@@ -12,35 +12,33 @@ from backend import ai
 
 class ModelChoiceTest(unittest.TestCase):
     def setUp(self):
-        env = mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test", "GROQ_API_KEY": ""})
+        env = mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "test"})
         env.start()
         self.addCleanup(env.stop)
         self.tried = []
 
-        def fake(provider, history, model, system, user, audit):
-            self.tried.append((provider, model))
+        def fake(history, model, system, user, audit):
+            self.tried.append(model)
             return {"answer": "ok", "tools_used": []}
-        patch = mock.patch.object(ai, "_answer_with", side_effect=fake)
+        patch = mock.patch.object(ai, "_answer_anthropic", side_effect=fake)
         patch.start()
         self.addCleanup(patch.stop)
         self.user = {"id": 1, "username": "u", "role": "ceo", "full_name": "U", "employee_id": None}
 
     def ask(self, model):
-        with mock.patch.object(ai, "PROVIDER", "anthropic"):
-            return ai.answer([{"role": "user", "content": "hi"}], self.user, model=model)
+        return ai.answer([{"role": "user", "content": "hi"}], self.user, model=model)
 
     def test_chosen_model_is_tried_first(self):
         self.ask("claude-haiku-5-5")
-        self.assertEqual(self.tried[0], ("anthropic", "claude-haiku-5-5"))
+        self.assertEqual(self.tried[0], "claude-haiku-5-5")
 
     def test_unknown_model_is_ignored(self):
         self.ask("gpt-evil")
-        self.assertNotIn("gpt-evil", [m for _, m in self.tried])
-        self.assertEqual(self.tried[0][1], ai.MODEL)
+        self.assertNotIn("gpt-evil", self.tried)
+        self.assertEqual(self.tried[0], ai.MODEL)
 
     def test_status_lists_models(self):
-        with mock.patch.object(ai, "PROVIDER", "anthropic"):
-            self.assertEqual([m["id"] for m in ai.status()["models"]], [m["id"] for m in ai.CLAUDE_MODELS])
+        self.assertEqual([m["id"] for m in ai.status()["models"]], [m["id"] for m in ai.CLAUDE_MODELS])
 
 
 class ConversationModelTest(unittest.TestCase):

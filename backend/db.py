@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS targets (
     id           INTEGER PRIMARY KEY,
     unit_id      INTEGER REFERENCES units(id) ON DELETE CASCADE,  -- NULL = toàn công ty
     period       TEXT NOT NULL,    -- VD: 2026, 2026-Q4, 2026-10
-    metric       TEXT NOT NULL,    -- doanh_thu | doanh_so | loi_nhuan | khac
+    metric       TEXT NOT NULL,    -- doanh_so | doanh_thu | loi_nhuan | dong_tien | okr_du_an | khac
     metric_name  TEXT,
     target_value REAL,
     actual_value REAL,
@@ -151,6 +151,14 @@ CREATE TABLE IF NOT EXISTS documents (
     uploaded_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
     uploaded_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+
+-- Đơn vị dùng chung tài liệu, ngoài đơn vị chủ quản (documents.unit_id): một tài liệu hiện ở nhiều phòng ban
+CREATE TABLE IF NOT EXISTS document_units (
+    doc_id  INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    unit_id INTEGER NOT NULL REFERENCES units(id) ON DELETE CASCADE,
+    PRIMARY KEY (doc_id, unit_id)
+);
+CREATE INDEX IF NOT EXISTS idx_document_units_unit ON document_units(unit_id);
 
 -- Lịch sử trò chuyện với trợ lý AI, riêng theo từng tài khoản
 -- Người duyệt đã đối chiếu từng trang văn bản AI đọc với bản gốc: verified = đúng, edited = đã sửa
@@ -304,6 +312,63 @@ CREATE TABLE IF NOT EXISTS proposals (
     created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+-- Lịch sử tiến trình của đề xuất (mỗi lần giao việc, đổi trạng thái, ghi chú)
+CREATE TABLE IF NOT EXISTS proposal_events (
+    id          INTEGER PRIMARY KEY,
+    proposal_id INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    kind        TEXT NOT NULL,                -- create | status | assign | note | file
+    from_status TEXT,
+    to_status   TEXT,
+    note        TEXT,
+    at          TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_proposal_events ON proposal_events(proposal_id, id);
+-- File đính kèm đề xuất: ref = tài liệu tham chiếu, result = kết quả / bằng chứng thực hiện (xem backend/proposals.py)
+CREATE TABLE IF NOT EXISTS proposal_files (
+    id          INTEGER PRIMARY KEY,
+    proposal_id INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL DEFAULT 'ref',
+    filename    TEXT NOT NULL,
+    stored_path TEXT NOT NULL,
+    size_bytes  INTEGER,
+    uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    uploaded_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_proposal_files ON proposal_files(proposal_id);
+
+-- Ngân sách hoạt động 2026 (xem backend/opbudget.py): kế hoạch theo mã công việc và số chi thực tế theo tháng
+CREATE TABLE IF NOT EXISTS budget_lines (
+    code       TEXT PRIMARY KEY,           -- mã công việc, ví dụ 9300.01.01
+    name       TEXT NOT NULL,
+    section    TEXT NOT NULL,              -- nhóm chi phí lớn (lương, hành chính, phòng ban...)
+    grp        TEXT NOT NULL DEFAULT '',   -- nhóm con (đội xe, Ban TGĐ...); rỗng nếu không có
+    plan_total REAL NOT NULL DEFAULT 0,    -- ngân sách 2026 tổng duyệt (cột S của file)
+    basic      REAL,                       -- phần Basic
+    extra      REAL,                       -- phần xét thêm
+    invest     REAL,                       -- ngân sách đầu tư (IT, MKT, PTNNL), không tính vào mốc cảnh báo
+    note       TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS budget_actuals (
+    code       TEXT NOT NULL REFERENCES budget_lines(code) ON DELETE CASCADE,
+    month      INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+    amount     REAL NOT NULL,
+    updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    PRIMARY KEY (code, month)
+);
+-- Quyết định của Ban TGĐ với hạng mục: duyệt bổ sung ngân sách, chặn / cho tiếp tục phát sinh chi phí
+CREATE TABLE IF NOT EXISTS budget_decisions (
+    id         INTEGER PRIMARY KEY,
+    code       TEXT NOT NULL REFERENCES budget_lines(code) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('supplement', 'block', 'unblock')),
+    amount     REAL,                       -- số tiền bổ sung (kind = supplement)
+    note       TEXT,
+    decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    decided_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_budget_decisions_code ON budget_decisions(code, id);
 """
 
 MIGRATIONS = [
@@ -356,6 +421,11 @@ MIGRATIONS = [
     "ALTER TABLE ai_query_log ADD COLUMN cost_usd REAL",  # chi phí ước tính của cả câu hỏi (mọi vòng tra cứu)
     "ALTER TABLE ai_usage_log ADD COLUMN user_id INTEGER",  # người gây ra lần gọi (chủ file / người tải lên), để tính vào trần cá nhân
     "ALTER TABLE documents ADD COLUMN content_hash TEXT",   # sha256 của file gốc: file trùng thì dùng lại kết quả đã đọc, khỏi tốn AI
+    # Người giữ chức danh này báo cáo cho ai (VD người phụ trách điều hành báo cáo Trưởng ban); NULL = theo cây tổ chức
+    "ALTER TABLE positions ADD COLUMN reports_to_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL",
+    "ALTER TABLE proposals ADD COLUMN owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL",  # người phụ trách (tài khoản); cột owner giữ tên hiển thị
+    "ALTER TABLE proposals ADD COLUMN due_date TEXT",   # hạn hoàn thành (YYYY-MM-DD)
+    "ALTER TABLE proposals ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'",  # high | normal | low
 ]
 
 

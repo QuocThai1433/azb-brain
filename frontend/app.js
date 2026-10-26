@@ -6,12 +6,12 @@ const fmtNum = (n) => (n == null ? "—" : Number(n).toLocaleString("vi-VN"));
 
 const UNIT_TYPES = { board: "HĐQT", executive: "Ban điều hành", division: "Khối", department: "Phòng/Ban", committee: "Ban chuyên trách", project: "Dự án" };
 const COLOR_GROUPS = { exec: "Điều hành", hr: "Nhân sự - Hành chính", ops: "Vận hành", finance: "Tài chính", technical: "Kinh tế - Kỹ thuật", construction: "Thi công / Xây lắp", commercial: "Thương mại" };
-const METRICS = { doanh_thu: "Doanh thu", doanh_so: "Doanh số", loi_nhuan: "Lợi nhuận", khac: "Chỉ tiêu khác" };
+const METRICS = { doanh_so: "Doanh số", doanh_thu: "Doanh thu", loi_nhuan: "Lợi nhuận", dong_tien: "Dòng tiền", okr_du_an: "OKRs dự án", khac: "Chỉ tiêu khác" };
 const PROCESS_STATUS = { draft: "Nháp", active: "Đang áp dụng", retired: "Hết hiệu lực" };
-const PROPOSAL_STATUS = { new: "Mới", approved: "Đã duyệt", in_progress: "Đang thực hiện", done: "Hoàn thành", dropped: "Không thực hiện" };
-const PROPOSAL_CLASS = { new: "brand", approved: "ok", in_progress: "warn", done: "ok", dropped: "" };
+const PROPOSAL_STATUS = { new: "Mới", approved: "Đã duyệt", in_progress: "Đang thực hiện", review: "Chờ nghiệm thu", done: "Hoàn thành", dropped: "Không thực hiện" };
+const PROPOSAL_CLASS = { new: "brand", approved: "ok", in_progress: "warn", review: "brand", done: "ok", dropped: "" };
 const TITLES = [["CT", "Chủ tịch HĐQT"], ["TGĐ", "Tổng Giám đốc"], ["PTGĐ", "Phó Tổng Giám đốc"], ["GĐK", "Giám đốc Khối"], ["GĐ", "Giám đốc"],
-  ["TB", "Trưởng ban"], ["PB", "Phó ban"], ["TP", "Trưởng phòng"], ["PP", "Phó phòng"], ["TBP", "Trưởng bộ phận"], ["NV", "Nhân viên"]];
+  ["TB", "Trưởng ban"], ["PB", "Phó ban"], ["PT", "Phụ trách điều hành"], ["TP", "Trưởng phòng"], ["PP", "Phó phòng"], ["TBP", "Trưởng bộ phận"], ["NV", "Nhân viên"]];
 const color = (g) => `var(--g-${g || "exec"})`;
 
 const DOC_STATUS = { pending: ["Chờ xử lý", "warn"], processing: ["Đang đọc...", "warn"], ok: ["Đã đánh chỉ mục", "ok"], needs_ocr: ["Chưa đọc được (cần OCR)", "bad"], failed: ["Chưa đọc được", "bad"] };
@@ -43,6 +43,7 @@ const ICONS = {
   check: '<path d="m5 12 5 5 9-10"/>',
   userx: '<circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M17 8l4 4M21 8l-4 4"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
   upload: '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>',
@@ -51,6 +52,7 @@ const ICONS = {
   reset: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
   left: '<path d="M15 6l-6 6 6 6"/>',
   right: '<path d="m9 6 6 6-6 6"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
 };
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 const FEATURE_LABELS = { import_hr: "Nhập file HCNS", docs_view: "Xem tài liệu", docs_edit: "Sửa tài liệu (thêm/sửa)", docs_delete: "Xoá tài liệu", docs_download: "Tải file gốc tài liệu", insights: "Xem Phân tích", ai_use: "Dùng trợ lý AI" };
@@ -203,7 +205,7 @@ async function boot() {
   document.body.classList.toggle("logged-out", !st.user);
   if (!st.user) return renderLogin(st.needs_setup);
   const u = st.user;
-  const show = { chat: u.can_use_ai, myfiles: u.can_use_ai, memory: u.can_use_ai, insights: can("insights"), users: ["admin", "ceo"].includes(u.role), access: u.role !== "ceo", docs: can("docs_view"), history: ["admin", "ceo"].includes(u.role), proposals: u.can_use_ai };
+  const show = { chat: u.can_use_ai, myfiles: u.can_use_ai, memory: u.can_use_ai, insights: can("insights"), users: ["admin", "ceo"].includes(u.role), access: u.role !== "ceo", docs: can("docs_view"), history: ["admin", "ceo"].includes(u.role), budget: ["admin", "ceo"].includes(u.role), aicost: ["admin", "ceo"].includes(u.role), proposals: u.can_use_ai || u.proposals_assigned > 0 };
   document.querySelectorAll("#nav button").forEach((b) => (b.hidden = show[b.dataset.view] === false));
   document.querySelectorAll("#nav .nav-group").forEach((g) => {  // ẩn tiêu đề nhóm nếu không còn mục nào
     let n = g.nextElementSibling, any = false;
@@ -385,7 +387,7 @@ const canSee = (view) => !document.querySelector(`#nav button[data-view="${view}
 
 // Đường dẫn tiếng Việt: /phong-ban/<id>/<tab>, /nhan-su/<id>, /muc-tieu-doanh-thu/<id>...; trang chủ (Tổng quan) giữ nguyên "/".
 // Đổi trang thì ghi vào lịch sử để Back/F5/chia sẻ link hoạt động. Backend trả index.html cho các đường dẫn này (spa_fallback trong app.py).
-const VIEW_SLUG = { overview: "", chart: "so-do-to-chuc", units: "phong-ban", people: "nhan-su", targets: "muc-tieu-doanh-thu", proposals: "de-xuat",
+const VIEW_SLUG = { overview: "", chart: "so-do-to-chuc", units: "phong-ban", people: "nhan-su", targets: "muc-tieu-doanh-thu", budget: "ngan-sach", proposals: "de-xuat",
   docs: "tai-lieu", insights: "phan-tich", chat: "tro-ly-ai", myfiles: "du-lieu-cua-toi", profile: "ho-so-cua-toi", memory: "ai-nho-gi-ve-toi",
   history: "lich-su-thay-doi", users: "tai-khoan", access: "quyen-truy-cap" };
 const TAB_SLUG = { org: "so-do", process: "quy-trinh", docs: "tai-lieu", target: "muc-tieu", info: "chuc-nang" };
@@ -424,6 +426,9 @@ addEventListener("popstate", () => {
   const r = parsePath();
   go(r.view, r.extra, true);
 });
+
+addEventListener("beforeprint", () => { if (state.view === "budget") state.bkPrint?.before(); });  // trang Ngân sách: mở hết nhóm khi in
+addEventListener("afterprint", () => { if (state.view === "budget") state.bkPrint?.after(); });
 
 // fromUrl: điều hướng do mở link / Back / Forward, nên chỉ chuẩn hoá URL chứ không thêm mục lịch sử
 function go(view, extra = {}, fromUrl = false) {
@@ -527,6 +532,58 @@ function toast(msg, type = "ok") {
 }
 
 // ---------------- Modal form ----------------
+// Năm chỉ tiêu trọng yếu nhập cùng lúc: mỗi chỉ tiêu một cặp "mục tiêu / thực hiện"; ô để trống thì bỏ qua.
+// Theo "Mục tiêu và chương trình hành động công ty": KRI 01 doanh số, KRI 02 doanh thu, KRI 03 chi phí/hiệu quả tài chính,
+// KRI 04 dòng tiền (thu hồi công nợ, thu tiền), KRI 05 OKRs dự án. Tiền nhập theo tỷ đồng, lưu theo VNĐ như dữ liệu cũ.
+const KEY_METRICS = ["doanh_so", "doanh_thu", "loi_nhuan", "dong_tien", "okr_du_an"];
+const KEY_METRIC_FORM = {
+  doanh_so: { unit: "tỷ đồng", hint: "KRI 01" },
+  doanh_thu: { unit: "tỷ đồng", hint: "KRI 02" },
+  loi_nhuan: { unit: "tỷ đồng", hint: "KRI 03" },
+  dong_tien: { unit: "%", hint: "KRI 04 – tỷ lệ thu hồi công nợ, thu tiền" },
+  okr_du_an: { unit: "%", hint: "KRI 05 – tỷ lệ dự án đạt yêu cầu" },
+};
+
+// Kỳ nhập bằng hai ô Năm + Kỳ (Cả năm / Quý 1–4) rồi ghép thành "2026" hoặc "2026-Q3" như dữ liệu cũ.
+const QUARTERS = [["", "Cả năm"], ["Q1", "Quý 1"], ["Q2", "Quý 2"], ["Q3", "Quý 3"], ["Q4", "Quý 4"]];
+const periodFields = () => [
+  { name: "year", label: "Năm", required: true, placeholder: "2026", half: true },
+  { name: "quarter", label: "Kỳ", type: "select", options: QUARTERS, half: true },
+];
+function periodValues(p) {
+  const m = /^(\d{4})(?:-(Q[1-4]))?$/.exec(String(p || ""));
+  return { year: m ? m[1] : /^\d{4}/.exec(String(p || ""))?.[0] || String(new Date().getFullYear()), quarter: m?.[2] || "" };
+}
+function joinPeriod(raw) {
+  const y = String(raw.year || "").trim();
+  if (!/^\d{4}$/.test(y)) throw new Error("năm gồm 4 chữ số, ví dụ 2026.");
+  return raw.quarter ? `${y}-${raw.quarter}` : y;
+}
+
+function keyMetricFields() {
+  return KEY_METRICS.map((m, i) => ({
+    type: "pair", head: i === 0, names: [`${m}_target`, `${m}_actual`], labels: ["Mục tiêu", "Thực hiện"],
+    label: METRICS[m], hint: `${KEY_METRIC_FORM[m].unit} · ${KEY_METRIC_FORM[m].hint}`,
+  }));
+}
+
+// Lưu các chỉ tiêu đã nhập: đã có dòng cùng đơn vị + kỳ + loại thì cập nhật, chưa có thì thêm mới.
+async function saveKeyMetrics(raw, unitId, period) {
+  period = String(period || "").trim();
+  if (!period) throw new Error("cần nhập kỳ.");
+  const scale = (m) => (KEY_METRIC_FORM[m].unit === "%" ? 1 : 1e9);  // ô nhập là tỷ đồng → VNĐ
+  const num = (m, v) => (v === "" || v == null ? null : Math.round(Number(v) * scale(m) * 100) / 100);
+  const filled = KEY_METRICS.filter((m) => num(m, raw[`${m}_target`]) != null || num(m, raw[`${m}_actual`]) != null);
+  if (!filled.length) throw new Error("nhập ít nhất một chỉ tiêu (mục tiêu hoặc thực hiện).");
+  const existing = await api("/api/targets");
+  for (const m of filled) {
+    const body = { unit_id: unitId, period, metric: m, metric_name: "", target_value: num(m, raw[`${m}_target`]),
+                   actual_value: num(m, raw[`${m}_actual`]), unit_label: KEY_METRIC_FORM[m].unit === "%" ? "%" : "VNĐ" };
+    const old = existing.find((t) => (t.unit_id ?? null) === unitId && t.period === period && t.metric === m);
+    await api(old ? `/api/targets/${old.id}` : "/api/targets", { method: old ? "PUT" : "POST", body });
+  }
+}
+
 function openForm(title, fields, values = {}, onSave, okLabel = "Lưu") {
   const modal = $("#modal");
   $("#modal-title").textContent = title;
@@ -546,6 +603,16 @@ function openForm(title, fields, values = {}, onSave, okLabel = "Lưu") {
           .join("")}</select>`;
       } else if (f.type === "textarea") {
         input = `<textarea name="${f.name}" placeholder="${esc(f.placeholder || "")}" ${f.required ? "required" : ""}>${esc(v)}</textarea>`;
+      } else if (f.type === "units") {  // chọn nhiều đơn vị: chip đã chọn + ô tìm để thêm
+        input = `<div class="unit-pick" data-units="${f.name}"><div class="unit-chips"></div>
+          <input type="search" class="unit-q" placeholder="${esc(f.placeholder || "Gõ tên phòng ban để thêm...")}" autocomplete="off">
+          <div class="combo-list" hidden></div></div>`;
+      } else if (f.type === "pair") {  // một hàng: tên chỉ tiêu + hai ô số cạnh nhau (mục tiêu / thực hiện)
+        const [a, b] = f.names, [la, lb] = f.labels;
+        return `${f.head ? `<div class="pair-row pair-head"><span></span><span>${esc(la)}</span><span>${esc(lb)}</span></div>` : ""}
+          <div class="pair-row"><div class="pair-name"><b>${esc(f.label)}</b><small>${esc(f.hint || "")}</small></div>
+            <input name="${a}" type="number" step="any" value="${esc(values[a] ?? "")}" placeholder="${esc(la)}" aria-label="${esc(f.label)} – ${esc(la)}">
+            <input name="${b}" type="number" step="any" value="${esc(values[b] ?? "")}" placeholder="${esc(lb)}" aria-label="${esc(f.label)} – ${esc(lb)}"></div>`;
       } else if (f.type === "info") {
         return f.group ? `<div class="form-group">${esc(f.label)}</div>` : `<p class="muted" style="margin:0 0 8px">${esc(f.label)}</p>`;
       } else if (f.type === "check") {
@@ -555,7 +622,7 @@ function openForm(title, fields, values = {}, onSave, okLabel = "Lưu") {
       } else {
         input = `<input name="${f.name}" type="${f.type || "text"}" value="${esc(v)}" placeholder="${esc(f.placeholder || "")}" ${f.required ? "required" : ""} step="any"${f.type === "password" ? ' autocomplete="new-password" readonly onfocus="this.readOnly=false"' : ""}>`;
       }
-      return `<div class="field"><label>${esc(f.label)}</label>${input}</div>`;
+      return `<div class="field${f.half ? " half" : ""}"><label>${esc(f.label)}</label>${input}</div>`;
     })
     .join("");
   const form = $("#modal-form");
@@ -608,12 +675,57 @@ function openForm(title, fields, values = {}, onSave, okLabel = "Lưu") {
     };
     box.onblur = () => { list.hidden = true; };
   });
+  const picks = {};  // field.type "units": tên trường -> Set id đơn vị đã chọn
+  fields.filter((f) => f.type === "units").forEach((f) => {
+    const root = form.querySelector(`[data-units="${f.name}"]`), chips = root.querySelector(".unit-chips");
+    const box = root.querySelector(".unit-q"), list = root.querySelector(".combo-list");
+    const primary = () => (f.primary && form.elements[f.primary] ? String(form.elements[f.primary].value) : "");
+    const sel = (picks[f.name] = new Set((values[f.name] || []).map(String)));
+    const nameOf = (id) => (f.options.find(([v]) => String(v) === id) || [, id])[1];
+    const drawChips = () => {
+      chips.innerHTML = sel.size
+        ? [...sel].map((id, i) => `<span class="unit-chip${f.ordered && i === 0 ? " main" : ""}">${f.ordered && i === 0 ? '<em>Chủ quản</em>' : f.ordered ? `<button type="button" class="mk" data-main="${esc(id)}" title="Đặt làm đơn vị chủ quản">☆</button>` : ""}${esc(nameOf(id))}<button type="button" data-rm="${esc(id)}" aria-label="Bỏ ${esc(nameOf(id))}">×</button></span>`).join("")
+        : `<span class="muted">${esc(f.empty || "Chưa chia sẻ cho phòng ban nào khác.")}</span>`;
+    };
+    const show = () => {
+      const q = plain(box.value.trim());
+      const hits = f.options.filter(([v, l]) => String(v) !== primary() && !sel.has(String(v)) && (!q || plain(l).includes(q)));
+      list.innerHTML = hits.length
+        ? hits.map(([v, l]) => `<button type="button" class="combo-item" data-val="${esc(v)}">${esc(l)}</button>`).join("")
+        : '<div class="combo-empty">Không còn phòng ban nào khớp.</div>';
+      list.hidden = false;
+    };
+    chips.onclick = (e) => {
+      const b = e.target.closest("[data-rm]"), m = e.target.closest("[data-main]");
+      if (b) sel.delete(b.dataset.rm);
+      else if (m) { const rest = [...sel].filter((x) => x !== m.dataset.main); sel.clear(); [m.dataset.main, ...rest].forEach((x) => sel.add(x)); }
+      else return;
+      drawChips();
+    };
+    box.oninput = box.onfocus = show;
+    box.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); list.querySelector(".combo-item")?.click(); }
+      else if (e.key === "Escape" && !list.hidden) { e.stopPropagation(); e.preventDefault(); list.hidden = true; }
+    };
+    list.onmousedown = (e) => e.preventDefault();
+    list.onclick = (e) => {
+      const b = e.target.closest(".combo-item");
+      if (!b) return;
+      sel.add(b.dataset.val); box.value = ""; drawChips(); show();
+    };
+    box.onblur = () => { list.hidden = true; };
+    if (f.primary && form.elements[f.primary]) form.elements[f.primary].addEventListener("change", () => { sel.delete(primary()); drawChips(); });
+    sel.delete(primary());
+    drawChips();
+  });
   form.onsubmit = async (e) => {
     e.preventDefault();
     const data = {};
     fields.forEach((f) => {
+      if (f.type === "units") return (data[f.name] = [...picks[f.name]].map(Number));
       if (f.type === "file") return (data[f.name] = form.elements[f.name].files[0]);
       if (f.type === "info") return;
+      if (f.type === "pair") return f.names.forEach((n) => { const v = form.elements[n].value; data[n] = v === "" ? null : Number(v); });
       if (f.type === "check") return (data[f.name] = form.elements[f.name].checked);
       let val = form.elements[f.name].value;
       if (f.type === "number" || f.numeric) val = val === "" ? null : Number(val);
@@ -890,8 +1002,11 @@ const VIEWS = {
            onclick="event.stopPropagation(); go('units',{unitId:${u.id}})">
         <div class="n">${esc(u.name)} ${u.verified ? "" : '<span class="badge warn" title="Cần xác nhận">?</span>'}</div>
         <div class="h">${headTxt(u) || "—"}</div>
+        ${(u.deputies || []).map((d) => `<div class="h">${esc(d.title_code)}. ${esc(d.name)}</div>`).join("")}
       </div>`;
-    const node = (u) => nodeSelf(u) + (u.children.length ? `<div class="org-children">${u.children.map(node).join("")}</div>` : "");
+    const HIDDEN_IN_CHART = ["DV-HCNS"];  // Bộ phận Dịch vụ: ẩn khỏi sơ đồ, vẫn có trong danh sách đơn vị
+    const shown = (u) => u.children.filter((c) => !HIDDEN_IN_CHART.includes(c.code));
+    const node = (u) => nodeSelf(u) + (shown(u).length ? `<div class="org-children">${shown(u).map(node).join("")}</div>` : "");
     // Cột cấp 1 (PTGĐ / Khối): nếu có ≥2 khối con thì xếp ngang như sơ đồ gốc (VD PTGĐ Thường trực: Kinh tế KT | Thi công | QA/QC, HSSE)
     const splitOf = (u) => {
       const divs = u.children.filter((c) => c.unit_type === "division");
@@ -900,7 +1015,7 @@ const VIEWS = {
     const colBody = (u) => {
       const sp = splitOf(u);
       if (sp) return `<div class="org-split">${sp.divs.map((d) => `<div>${node(d)}</div>`).join("")}${sp.rest.length ? `<div>${sp.rest.map(node).join("")}</div>` : ""}</div>`;
-      return u.children.length ? `<div class="org-children">${u.children.map(node).join("")}</div>` : "";
+      return shown(u).length ? `<div class="org-children">${shown(u).map(node).join("")}</div>` : "";
     };
     const colWeight = (u) => { const sp = splitOf(u); return sp ? (sp.divs.length + (sp.rest.length ? 1 : 0)) * 1.15 : 1; };
     const ptgdTT = cols.find((c) => c.code === "PTGD-TT");
@@ -1360,31 +1475,123 @@ const VIEWS = {
     }));
   },
 
-  async proposals(main, status = "") {
-    const list = await api("/api/proposals" + (status ? `?status=${encodeURIComponent(status)}` : ""));
-    const isBoss = !!state.user.edit_all;
-    const tabs = [["", "Tất cả"], ...Object.entries(PROPOSAL_STATUS)];
+  async proposals(main) {
+    const P = (state.prop ||= { filter: "", open: null });
+    if (!P.meta) P.meta = await api("/api/proposals/meta");
+    const meta = P.meta, isBoss = !!state.user.edit_all;
+    const go = (patch) => { Object.assign(P, patch); VIEWS.proposals(main); };
+    const when = (s) => esc(String(s || "").slice(0, 16));
+    const prioBadge = (p) => (p.priority === "high" ? '<span class="badge bad">Ưu tiên cao</span>' : p.priority === "low" ? '<span class="badge">Ưu tiên thấp</span>' : "");
+    const dueChip = (p) => (p.due_date ? `<span class="pp-chip${p.overdue ? " bad" : ""}">${icon("alert")}Hạn ${esc(p.due_date)}${p.overdue ? " · quá hạn" : ""}</span>` : "");
+    // Nhãn nút theo trạng thái hiện tại → trạng thái đích; thứ tự ưu tiên chọn nút chính
+    const moveLabel = (from, to) => ({ approved: "Duyệt đề xuất", in_progress: from === "approved" ? "Bắt đầu thực hiện" : from === "review" ? "Trả lại làm tiếp" : "Mở lại thực hiện",
+      review: "Báo hoàn thành", done: "Nghiệm thu hoàn thành", dropped: "Không thực hiện", new: "Mở lại đề xuất" })[to];
+    const MAIN_ORDER = ["done", "review", "approved", "in_progress", "new"];
+    const STEPS = ["new", "approved", "in_progress", "review", "done"];
+
+    if (P.open) {  // ---- Chi tiết một đề xuất ----
+      let p;
+      try { p = await api(`/api/proposals/${P.open}`); } catch (e) { toast(e.message, "err"); return go({ open: null }); }
+      const refresh = () => VIEWS.proposals(main);
+      const mine = p.owner_user_id === state.user.id;
+      const canResult = isBoss || mine;
+      const cur = STEPS.indexOf(p.status);
+
+      const stepper = p.status === "dropped"
+        ? `<div class="pp-dropped">${icon("alert")}<span><b>Không thực hiện.</b> ${esc([...p.events].reverse().find((e) => e.to_status === "dropped")?.note || "")}</span></div>`
+        : `<ol class="pp-steps">${STEPS.map((s, i) => `<li class="${i < cur || p.status === "done" ? "done" : i === cur ? "now" : ""}"><span class="dot">${i < cur || p.status === "done" ? icon("check") : i + 1}</span><span class="lbl">${PROPOSAL_STATUS[s]}</span></li>`).join("")}</ol>`;
+
+      const moves = [...p.moves].sort((a, b) => MAIN_ORDER.indexOf(a) - MAIN_ORDER.indexOf(b) || 0);
+      const mainMove = moves.find((s) => s !== "dropped");
+      const btn = (s) => `<button class="${s === mainMove ? "primary" : s === "dropped" ? "ghost danger" : "ghost"}" data-move="${s}">${s === mainMove ? icon("check") : ""}${moveLabel(p.status, s)}</button>`;
+      const actions = `${moves.filter((s) => s !== "dropped").map(btn).join("")}${p.can_assign ? `<button class="ghost" id="prop-assign">${icon("users")}Giao việc / đặt hạn</button>` : ""}${moves.includes("dropped") ? btn("dropped") : ""}`;
+
+      const fileCard = (kind, title, hint, canUp) => {
+        const fs = p.files.filter((f) => f.kind === kind);
+        return `<section class="card pp-card"><div class="pp-card-head"><div><h3>${title}</h3><small>${hint}</small></div>
+          ${canUp ? `<button class="ghost pp-sm" data-up="${kind}">${icon("upload")}Tải lên</button>` : ""}</div>
+          ${fs.length ? `<ul class="pp-files">${fs.map((f) => `<li><span class="pp-fico">${icon("file")}</span>
+            <div class="pp-fmeta"><a href="/api/proposals/${p.id}/files/${f.id}">${esc(f.filename)}</a>
+              <small>${fmtSize(f.size_bytes)} · ${esc(f.by_name || "—")} · ${when(f.uploaded_at)}</small></div>
+            ${isBoss || f.uploaded_by === state.user.id ? `<button class="link danger" data-del-file="${f.id}">Xoá</button>` : ""}</li>`).join("")}</ul>`
+            : `<div class="pp-empty">Chưa có file${canUp ? ' — bấm “Tải lên” để thêm' : ""}.</div>`}</section>`;
+      };
+
+      const EV = { create: "Tạo đề xuất", assign: "Giao việc", note: "Cập nhật ghi chú", file: "File" };
+      const events = [...p.events].reverse().map((e) => `<li class="${e.kind}"><span class="pp-dot"></span><div>
+        <b>${e.kind === "status" ? `${esc(PROPOSAL_STATUS[e.from_status] || "")} → ${esc(PROPOSAL_STATUS[e.to_status] || "")}` : esc(EV[e.kind] || e.kind)}</b>
+        ${e.note ? `<p>${esc(e.note)}</p>` : ""}<small>${esc(e.by_name || "—")} · ${when(e.at)}</small></div></li>`).join("");
+
+      main.innerHTML = `
+        <button class="link pp-back" id="prop-back">← Danh sách đề xuất</button>
+        <section class="card pp-head">
+          <div class="pp-title"><h2>${esc(p.title)}</h2><span class="badge ${PROPOSAL_CLASS[p.status]}">${PROPOSAL_STATUS[p.status]}</span></div>
+          <div class="pp-chips"><span class="pp-chip">${icon("users")}${esc(p.author || "—")}</span><span class="pp-chip">${when(p.created_at)}</span>${dueChip(p)}${prioBadge(p)}</div>
+          ${stepper}
+          <div class="pp-actions">${actions || '<span class="muted">Bạn chỉ xem được đề xuất này.</span>'}</div>
+        </section>
+        <div class="pp-grid">
+          <div class="pp-col">
+            ${p.body ? `<section class="card pp-card"><div class="pp-card-head"><div><h3>Nội dung đề xuất</h3></div></div><div class="pp-body">${esc(p.body)}</div></section>` : ""}
+            ${fileCard("ref", "Tài liệu tham chiếu", "Tài liệu liên quan để người thực hiện đối chiếu", true)}
+            ${fileCard("result", "Kết quả / bằng chứng thực hiện", "Bắt buộc có ít nhất một file trước khi báo hoàn thành", canResult)}
+          </div>
+          <aside class="pp-col">
+            <section class="card pp-card"><div class="pp-card-head"><div><h3>Thông tin xử lý</h3></div></div>
+              <dl class="pp-info"><dt>Người phụ trách</dt><dd>${p.owner_name || p.owner ? esc(p.owner_name || p.owner) : '<span class="muted">Chưa giao</span>'}</dd>
+                <dt>Hạn hoàn thành</dt><dd>${p.due_date ? esc(p.due_date) : '<span class="muted">Chưa đặt</span>'}</dd>
+                <dt>Ưu tiên</dt><dd>${esc(meta.priority[p.priority] || "Thường")}</dd>
+                <dt>Cập nhật gần nhất</dt><dd>${when(p.updated_at)}</dd></dl>
+              ${p.note ? `<div class="pp-note"><b>Ghi chú của Ban TGĐ</b><p>${esc(p.note)}</p></div>` : ""}</section>
+            <section class="card pp-card"><div class="pp-card-head"><div><h3>Lịch sử tiến trình</h3></div></div><ul class="pp-timeline">${events}</ul></section>
+          </aside>
+        </div>`;
+      $("#prop-back").onclick = () => go({ open: null });
+      main.querySelectorAll("[data-move]").forEach((b) => (b.onclick = () => {
+        const to = b.dataset.move, label = moveLabel(p.status, to);
+        const send = (note) => api(`/api/proposals/${p.id}`, { method: "PUT", body: { status: to, status_note: note || "" } }).then(refresh);
+        if (!["dropped", "review", "done"].includes(to)) return send("").catch((e) => toast(e.message, "err"));
+        openForm(label, [{ name: "note", label: to === "dropped" ? "Lý do không thực hiện (bắt buộc)" : "Ghi chú (không bắt buộc)", type: "textarea", required: to === "dropped" }],
+          {}, (d) => send(d.note), "Xác nhận");
+      }));
+      $("#prop-assign")?.addEventListener("click", () => openForm("Giao việc / đặt hạn", [
+        { name: "owner_user_id", label: "Người phụ trách", type: "select", search: true, numeric: true,
+          options: [["", "— Chọn —"], ...meta.assignees.map((u) => [u.id, `${u.full_name || u.username} (${u.username})`])] },
+        { name: "due_date", label: "Hạn hoàn thành", type: "date", half: true },
+        { name: "priority", label: "Ưu tiên", type: "select", options: Object.entries(meta.priority), half: true },
+        { name: "note", label: "Ghi chú của Ban TGĐ", type: "textarea" },
+      ], p, (d) => api(`/api/proposals/${p.id}`, { method: "PUT", body: { ...d, owner_user_id: d.owner_user_id || null } }).then(refresh)));
+      main.querySelectorAll("[data-up]").forEach((b) => (b.onclick = () => openForm(
+        b.dataset.up === "ref" ? "Tải tài liệu tham chiếu" : "Tải file kết quả / bằng chứng",
+        [{ name: "file", label: `Chọn file (tối đa ${meta.max_mb} MB)`, type: "file", accept: meta.allowed_ext.join(","), required: true }], {},
+        (d) => { const fd = new FormData(); fd.append("kind", b.dataset.up); fd.append("file", d.file); return api(`/api/proposals/${p.id}/files`, { method: "POST", body: fd }).then(refresh); }, "Tải lên")));
+      main.querySelectorAll("[data-del-file]").forEach((b) => (b.onclick = async () => {
+        if (!(await confirmBox("Xoá file?", "File được chuyển vào thùng rác, không xoá hẳn.", { okText: "Xoá" }))) return;
+        try { await api(`/api/proposals/${p.id}/files/${b.dataset.delFile}`, { method: "DELETE" }); refresh(); } catch (e) { toast(e.message, "err"); }
+      }));
+      return;
+    }
+
+    // ---- Danh sách ----
+    const q = P.filter === "mine" ? "?mine=true" : P.filter ? `?status=${encodeURIComponent(P.filter)}` : "";
+    const list = await api("/api/proposals" + q);
+    const tabs = [["", "Tất cả"], ["mine", "Giao cho tôi"], ...Object.entries(PROPOSAL_STATUS)];
     main.innerHTML = `
       <div class="page-head"><div><h2>Đề xuất cải tiến</h2>
-        <p>Đề xuất lưu từ câu trả lời của Trợ lý AI. ${isBoss ? "Ban TGĐ cập nhật tiến trình và người phụ trách." : "Bạn chỉ thấy đề xuất do mình lưu."}</p></div></div>
-      <div class="tabs">${tabs.map(([v, l]) => `<button class="${v === status ? "active" : ""}" data-st="${v}">${l}</button>`).join("")}</div>
-      ${list.length ? list.map((p) => `
-        <div class="card" style="margin-bottom:10px">
-          <div class="toolbar"><div><b>${esc(p.title)}</b> <span class="badge ${PROPOSAL_CLASS[p.status]}">${PROPOSAL_STATUS[p.status]}</span></div>
-            ${isBoss ? `<button class="link" data-edit-prop="${p.id}">Cập nhật</button>` : ""}</div>
-          <p class="muted" style="margin:4px 0">${esc(p.author || "—")} · ${esc(String(p.created_at).slice(0, 16))}${p.owner ? " · phụ trách: " + esc(p.owner) : ""}</p>
-          ${p.note ? `<p><b>Ghi chú:</b> ${esc(p.note)}</p>` : ""}
-          ${p.body ? `<details><summary>Nội dung đề xuất</summary><div class="process-content">${esc(p.body)}</div></details>` : ""}
-        </div>`).join("") : '<div class="card empty">Chưa có đề xuất nào. Bấm “Lưu thành đề xuất” dưới câu trả lời của Trợ lý AI để thêm.</div>'}`;
-    main.querySelectorAll("[data-st]").forEach((b) => (b.onclick = () => VIEWS.proposals(main, b.dataset.st)));
-    main.querySelectorAll("[data-edit-prop]").forEach((b) => (b.onclick = () => {
-      const p = list.find((x) => x.id == b.dataset.editProp);
-      openForm("Cập nhật đề xuất", [
-        { name: "status", label: "Tiến trình", type: "select", options: Object.entries(PROPOSAL_STATUS), default: "new" },
-        { name: "owner", label: "Người / bộ phận phụ trách" },
-        { name: "note", label: "Ghi chú của Ban TGĐ", type: "textarea" },
-      ], p, (data) => api(`/api/proposals/${p.id}`, { method: "PUT", body: data }).then(() => VIEWS.proposals(main, status)));
-    }));
+        <p>Đề xuất lưu từ câu trả lời của Trợ lý AI. ${isBoss ? "Ban TGĐ duyệt, giao người phụ trách, đặt hạn và nghiệm thu." : "Bạn thấy đề xuất do mình lưu và việc được giao cho mình."}</p></div></div>
+      <div class="tabs">${tabs.map(([v, l]) => `<button class="${v === P.filter ? "active" : ""}" data-st="${v}">${l}</button>`).join("")}</div>
+      ${list.length ? `<div class="pp-list">${list.map((p) => `<article class="card pp-item" data-open="${p.id}" tabindex="0" role="button">
+          <div class="pp-item-main"><h3>${esc(p.title)}</h3>
+            <div class="pp-chips"><span class="pp-chip">${icon("users")}${esc(p.author || "—")}</span><span class="pp-chip">${esc(String(p.created_at).slice(0, 10))}</span>
+              ${p.owner_name || p.owner ? `<span class="pp-chip brand">Phụ trách: ${esc(p.owner_name || p.owner)}</span>` : ""}${dueChip(p)}${prioBadge(p)}
+              ${p.file_count ? `<span class="pp-chip">${icon("file")}${p.file_count} file</span>` : ""}</div></div>
+          <span class="badge ${PROPOSAL_CLASS[p.status]}">${PROPOSAL_STATUS[p.status]}</span></article>`).join("")}</div>`
+        : '<div class="card empty">Chưa có đề xuất nào. Bấm “Lưu thành đề xuất” dưới câu trả lời của Trợ lý AI để thêm.</div>'}`;
+    main.querySelectorAll("[data-st]").forEach((b) => (b.onclick = () => go({ filter: b.dataset.st })));
+    main.querySelectorAll("[data-open]").forEach((el) => {
+      el.onclick = () => go({ open: el.dataset.open });
+      el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); el.click(); } };
+    });
   },
 
   async targets(main, period) {
@@ -1403,8 +1610,17 @@ const VIEWS = {
     // Chỉ admin/CEO sửa, xoá, thêm mục tiêu ngay trên trang này (dòng toàn công ty không có tab đơn vị để sửa)
     const canEdit = ["admin", "ceo"].includes(state.user?.role);
     const unitOptions = canEdit ? [["", "Toàn công ty"], ...(await api("/api/units")).map((u) => [u.id, u.name])] : [];
+    const allTargets = await api("/api/targets");  // đã lọc theo quyền xem; dùng cho bảng theo quý
     const reload = () => VIEWS.targets(main, cur);
-    const targetForm = (t = {}) => openForm(t.id ? "Sửa mục tiêu" : "Thêm mục tiêu", [
+    const targetForm = (t = {}) => t.id ? editTargetForm(t) : openForm("Thêm mục tiêu", [
+      { name: "unit_id", label: "Đơn vị", type: "select", options: unitOptions },
+      ...periodFields(),
+      ...keyMetricFields(),
+    ], { unit_id: "", ...periodValues(cur) }, async (raw) => {
+      await saveKeyMetrics(raw, raw.unit_id ? Number(raw.unit_id) : null, joinPeriod(raw));
+      reload();
+    });
+    const editTargetForm = (t) => openForm("Sửa mục tiêu", [
       { name: "unit_id", label: "Đơn vị", type: "select", options: unitOptions },
       { name: "period", label: "Kỳ", required: true, placeholder: "2026, 2026-Q4 hoặc 2026-10" },
       { name: "metric", label: "Loại chỉ tiêu", type: "select", options: Object.entries(METRICS), default: "doanh_thu" },
@@ -1445,7 +1661,7 @@ const VIEWS = {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(t);
     });
-    const totals = [...groups.values()].filter((g) => g.length > 1 && g.every((t) => t.target_value > 0 && t.actual_value != null)).map((g) => {
+    const totals = [...groups.values()].filter((g) => g.length > 1 && g[0].unit_label !== "%" && g.every((t) => t.target_value > 0 && t.actual_value != null)).map((g) => {
       const target = g.reduce((s, t) => s + Number(t.target_value), 0), actual = g.reduce((s, t) => s + Number(t.actual_value), 0);
       return { key: `${g[0].metric === "khac" ? `khac:${groupName(g[0])}` : g[0].metric}|${g[0].unit_label || ""}`, ids: g.map((t) => t.id), name: groupName(g[0]), label: g[0].unit_label || "", count: g.length, target, actual, pct: Math.round((actual / target) * 1000) / 10 };
     });
@@ -1577,8 +1793,44 @@ const VIEWS = {
       main.querySelectorAll("[data-tp-del]").forEach((b) => (b.onclick = (e) => { e.stopPropagation(); confirmDelete("targets", b.dataset.tpDel, "mục tiêu này", reload); }));
     };
 
+    // Bảng theo quý của năm đang chọn: mỗi dòng là một chỉ tiêu của một đơn vị. Cột "Cả năm": mục tiêu lấy từ dòng cả năm
+    // (không có thì cộng mục tiêu các quý); thực hiện là lũy kế các quý. Chỉ tiêu % không cộng được nên chỉ lấy dòng cả năm.
+    const quarterHtml = () => {
+      const year = periodValues(cur).year, QS = ["Q1", "Q2", "Q3", "Q4"];
+      const rowsByKey = new Map();
+      allTargets.filter((t) => t.period === year || t.period.startsWith(`${year}-Q`)).forEach((t) => {
+        const key = `${t.unit_id ?? ""}|${t.metric === "khac" ? t.metric_name : t.metric}|${t.unit_label || ""}`;
+        if (!rowsByKey.has(key)) rowsByKey.set(key, { t, q: {}, year: null });
+        const r = rowsByKey.get(key);
+        if (t.period === year) r.year = t; else r.q[t.period.slice(-2)] = t;
+      });
+      const order = (t) => (KEY_METRICS.includes(t.metric) ? KEY_METRICS.indexOf(t.metric) : KEY_METRICS.length);
+      const list = [...rowsByKey.values()].filter((r) => Object.keys(r.q).length)
+        .sort((a, b) => order(a.t) - order(b.t) || String(a.t.unit_name || "").localeCompare(String(b.t.unit_name || ""), "vi"));
+      const head = `<div class="tq-head"><h3 style="margin:0">Theo quý · năm ${esc(year)}</h3><span class="muted">Thêm mục tiêu với Kỳ = Quý 1 đến Quý 4 để có số từng quý.</span></div>`;
+      if (!list.length) return `<div class="card" style="margin-top:16px">${head}<div class="empty">Năm ${esc(year)} chưa có số theo quý.</div></div>`;
+      const cell = (t, label) => {
+        if (!t || (t.target_value == null && t.actual_value == null)) return '<span class="muted">—</span>';
+        const sfx = label === "%" ? "%" : "", pct = t.target_value > 0 && t.actual_value != null ? ` · ${Math.round((t.actual_value / t.target_value) * 100)}%` : "";
+        const unit = (v) => (v == null ? "" : sfx);
+        return `${fmtMoney(t.actual_value, label)}${unit(t.actual_value)}<small class="muted">/ ${fmtMoney(t.target_value, label)}${unit(t.target_value)}${pct}</small>`;
+      };
+      const yearCell = (r, label) => {
+        const qs = QS.map((k) => r.q[k]).filter(Boolean);
+        if (label === "%") return cell(r.year, label);
+        const sum = (f) => { const v = qs.map((t) => t[f]).filter((x) => x != null); return v.length ? v.reduce((s, x) => s + Number(x), 0) : null; };
+        const qTargets = qs.map((t) => t.target_value);
+        return cell({ actual_value: sum("actual_value"), target_value: r.year?.target_value ?? (qTargets.every((x) => x != null) ? sum("target_value") : null) }, label);
+      };
+      return `<div class="card tq" style="margin-top:16px">${head}<div class="table-scroll"><table>
+        <tr><th>Chỉ tiêu</th><th>Đơn vị</th>${QS.map((k, i) => `<th class="num">Quý ${i + 1}</th>`).join("")}<th class="num">Cả năm (lũy kế)</th></tr>
+        ${list.map((r) => { const label = r.t.unit_label || ""; return `<tr><td>${esc(metricName(r.t))}</td><td>${esc(r.t.unit_name || "Toàn công ty")}</td>
+          ${QS.map((k) => `<td class="num">${cell(r.q[k], label)}</td>`).join("")}<td class="num">${yearCell(r, label)}</td></tr>`; }).join("")}
+      </table></div></div>`;
+    };
+
     main.innerHTML = `
-      <div class="page-head"><div><h2>Mục tiêu doanh thu</h2>
+      <div class="page-head"><div><h2>Mục tiêu trọng yếu</h2>
         <p>Thực hiện so với mục tiêu theo kỳ. Đạt từ 100%; từ 70% đến dưới 100% là cần theo dõi; dưới 70% là chậm.
           Chỉ hiện mục tiêu của các đơn vị bạn được xem.</p></div>
         <div class="head-actions">
@@ -1591,7 +1843,8 @@ const VIEWS = {
         <div class="kpis" id="tp-kpis"></div>
         ${elapsed != null ? `<p class="muted tp-elapsed">Đã qua <b>${elapsed}%</b> thời gian của kỳ ${esc(cur)} (vạch đen trên thanh tiến độ). Dự báo cuối kỳ tính theo tốc độ hiện tại. Bấm một dòng để xem chi tiết, bấm thẻ để lọc, bấm tiêu đề cột để sắp xếp.</p>` : ""}
         ${insightHtml}
-        <div class="card" style="margin-top:16px"><div class="sort-bar" id="tp-sortbar"></div><table id="tp-table"></table></div>`}`;
+        <div class="card" style="margin-top:16px"><div class="sort-bar" id="tp-sortbar"></div><table id="tp-table"></table></div>`}
+      ${quarterHtml()}`;
     main.querySelector("#tp-add")?.addEventListener("click", () => targetForm());
     const sel = main.querySelector("#tp-period");
     if (sel) sel.onchange = () => VIEWS.targets(main, sel.value);
@@ -1606,24 +1859,49 @@ const VIEWS = {
   async insights(main) {
     const ins = await api("/api/insights");
     const unitLink = (id, name) => `<button class="link" onclick="go('units',{unitId:${id}})">${esc(name)}</button>`;
-    const block = (title, items, fmt, note) => `
-      <div class="card insight">
+    const clean = [];  // mục không có gì để báo: gom thành một dòng thay vì mỗi mục một thẻ trống
+    const block = (title, items, fmt, note) => {
+      if (!items.length) { clean.push(title); return ""; }
+      return `<div class="card insight">
         <h3>${title} <span class="badge">${items.length}</span></h3>
         ${note ? `<p class="muted">${note}</p>` : ""}
-        ${items.length ? `<ul>${items.map(fmt).join("")}</ul>` : '<div class="empty">Không có</div>'}
+        <ul>${items.map(fmt).join("")}</ul>
       </div>`;
+    };
+    const lead = (key, label) => {
+      const g = ins.leadership[key];
+      return `<details class="card lead-card"><summary><span class="lead-n">${g.count}</span><span class="lead-l">${label}</span></summary>
+        <ul class="lead-list">${g.people.map((p) => `<li><b>${esc(p.name)}</b> <span class="muted">${esc(p.title)}</span> ${unitLink(p.unit_id, p.unit_name)}</li>`).join("") || '<li class="muted">Chưa có ai</li>'}</ul></details>`;
+    };
     main.innerHTML = `
       <div class="page-head"><div><h2>Phân tích cơ cấu tổ chức</h2>
         <p>Các chỉ dấu dưới đây được tính trực tiếp từ dữ liệu, chưa phải kết luận. Hỏi Trợ lý AI để có đánh giá và đề xuất.</p></div>
         ${canSee("chat") ? `<button class="primary accent" onclick="go('chat')">${icon("spark")} Hỏi Trợ lý AI</button>` : ""}</div>
+      <div class="lead-row">${lead("heads", "Trưởng phòng / ban")}${lead("deputies", "Phó phòng / ban")}</div>
       <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(340px, 1fr))">
-        ${block("Người kiêm nhiệm nhiều đơn vị", ins.concurrent_roles, (x) => `<li><b>${esc(x.name)}</b>: ${x.roles.map(esc).join("; ")}</li>`,
+        ${block("Người kiêm nhiệm nhiều đơn vị", ins.concurrent_roles, (x) => {
+          const byTitle = {};  // gom chức danh trùng: "PTGĐ – A; PTGĐ – B" thành "PTGĐ: A, B"
+          const reportsTo = {};  // chức danh nào báo cáo cho ai: ghi một lần cho cả nhóm
+          x.role_items.forEach((r) => {
+            (byTitle[r.title] ||= []).push(r);
+            if (r.reports_to) reportsTo[r.title] = r.reports_to;
+          });
+          const chip = (id, name) => `<button type="button" class="chip chip-link" title="Mở ${esc(name)}" onclick="go('units',{unitId:${id}})">${esc(name)}</button>`;
+          const total = (x.manages || []).reduce((n, m) => n + m.units.length, 0);
+          const groups = (x.manages || []).map((m) => `<div class="mg-row"><span class="mg-via">${esc(m.via)}</span>
+            <span class="chips">${m.units.map((u, i) => chip(m.unit_ids[i], u)).join("")}</span></div>`).join("");
+          return `<li class="person"><div class="p-name">${esc(x.name)}</div>
+            ${Object.entries(byTitle).map(([t, rs]) => `<div class="p-role"><b>${esc(t)}</b> <span class="chips">${rs.map((r) => chip(r.unit_id, r.unit_name)).join("")}</span>${reportsTo[t] ? ` <span class="muted">→ báo cáo <b>${esc(reportsTo[t])}</b></span>` : ""}</div>`).join("")}
+            ${total ? `<details class="p-manages" ${total <= 6 ? "open" : ""}><summary>Quản lý trực tiếp <span class="badge">${total}</span></summary>${groups}</details>` : ""}</li>`;
+        },
           "Kiêm nhiệm giúp tiết kiệm chi phí nhưng tạo rủi ro quá tải và xung đột lợi ích (đặc biệt kiểm soát nội bộ vs tài chính).")}
-        ${block("Vị trí đang trống (TBA)", ins.vacancies, (x) => `<li>${esc(x.title)} – ${unitLink(x.unit_id, x.unit_name)}</li>`)}
-        ${block("Phòng/ban do cấp phó phụ trách", ins.deputy_led_departments, (x) => `<li>${unitLink(x.unit_id, x.unit_name)} – ${esc(x.title)} ${esc(x.name || "TBA")}</li>`,
+        ${block("Vị trí đang trống (TBA)", ins.vacancies, (x) => `<li>${esc(x.title)} – ${unitLink(x.unit_id, x.unit_name)}${x.reports_to ? ` · báo cáo <b>${esc(x.reports_to)}</b>` : ""}</li>`,
+          "Khi vị trí đứng đầu còn trống, cấp trên trực tiếp đang quản lý đơn vị.")}
+        ${block("Phòng/ban do cấp phó phụ trách", ins.deputy_led_departments, (x) => `<li>${unitLink(x.unit_id, x.unit_name)} – ${esc(x.title)} ${esc(x.name || "TBA")}${x.reports_to ? ` · báo cáo <b>${esc(x.reports_to)}</b>` : ""}</li>`,
           "Chưa có Trưởng phòng – cân nhắc bổ nhiệm hoặc xác nhận đây là chủ trương.")}
-        ${block("Tầm hạn quản lý (số đơn vị trực tiếp)", ins.span_of_control, (x) => `<li>${unitLink(x.unit_id, x.unit_name)}: <b>${x.direct_reports}</b></li>`)}
-        ${block("Phòng/ban chưa có quy trình", ins.units_without_process, (x) => `<li>${unitLink(x.unit_id, x.unit_name)}</li>`)}
+        ${block("Tầm hạn quản lý (số đơn vị trực tiếp)", ins.span_of_control, (x) => `<li>${unitLink(x.unit_id, x.unit_name)}: <b>${x.direct_reports}</b>
+          <span>· ${esc(x.head || "chưa có người đứng đầu")}${x.reports_to ? ` · báo cáo ${esc(x.reports_to)}` : ""}</span></li>`)}
+        ${block("Phòng/ban chưa có quy trình", ins.units_without_process, (x) => `<li>${unitLink(x.unit_id, x.unit_name)}${x.reports_to ? ` · báo cáo <b>${esc(x.reports_to)}</b>` : ""}</li>`)}
         ${block("Dữ liệu cần xác nhận", [...ins.unverified.units.map((u) => ({ ...u, k: "u" })), ...ins.unverified.employees.map((e) => ({ ...e, k: "e" }))],
           (x) => (x.k === "u" ? `<li>${unitLink(x.id, x.name)}: ${esc(x.full_name || "")}</li>` : `<li>Nhân sự: ${esc(x.full_name)}</li>`))}
         ${block("Quy trình cần rà soát", ins.stale_processes, (x) => `<li>${unitLink(x.unit_id, x.unit_name)}: ${esc((x.code ? x.code + " – " : "") + x.name)}
@@ -1634,6 +1912,7 @@ const VIEWS = {
           "Tài liệu ISO, quy định, biểu mẫu tải lên quá 12 tháng. Nên xem lại và tải bản mới nếu có thay đổi.")}
         ${block("Quy trình đang là bản nháp", ins.draft_processes, (x) => `<li>${unitLink(x.unit_id, x.unit_name)}: ${esc(x.name)}</li>`)}
       </div>
+      ${clean.length ? `<p class="insight-clean">✓ Không phát hiện vấn đề ở: ${clean.map(esc).join(" · ")}</p>` : ""}
       <div class="card" style="margin-top:16px">
         <h3>Biên chế theo đơn vị</h3>
         <p class="muted">Định biên là tổng số người theo sơ đồ. Nhân sự HCNS là số người đang gán vào đơn vị trong danh sách HCNS.
@@ -1641,7 +1920,7 @@ const VIEWS = {
         <table>
           <tr><th>Đơn vị</th><th class="num">Định biên</th><th class="num">Đã gán trên sơ đồ</th><th class="num">Còn trống</th><th class="num">Nhân sự HCNS</th><th class="num">Chênh lệch</th></tr>
           ${ins.staffing.map((s) => `<tr>
-            <td>${unitLink(s.unit_id, s.unit_name)}</td>
+            <td>${unitLink(s.unit_id, s.unit_name)}${s.reports_to ? `<br><small>báo cáo ${esc(s.reports_to)}</small>` : ""}</td>
             <td class="num">${s.planned}</td><td class="num">${s.seated}</td>
             <td class="num">${s.open_on_chart ? `<span class="badge warn">${s.open_on_chart}</span>` : "0"}</td>
             <td class="num">${s.hcns_active}</td>
@@ -1964,6 +2243,366 @@ const VIEWS = {
         } catch (e) { toast(e.message, "err"); }
       }));
     }).catch(() => {});
+  },
+
+  // Ngân sách hoạt động 2026: mốc so sánh là cột "tổng duyệt" cộng phần TGĐ duyệt bổ sung; cảnh báo tính ở backend (opbudget.py)
+  async budget(main) {
+    const r = await api("/api/budget" + (state.bkMonth ? `?month=${state.bkMonth}` : ""));
+    const pickFile = (accept, url, done) => {
+      const inp = document.createElement("input");
+      inp.type = "file"; inp.accept = accept;
+      inp.onchange = async () => {
+        if (!inp.files[0]) return;
+        const fd = new FormData();
+        fd.append("file", inp.files[0]);
+        try { done(await api(url, { method: "POST", body: fd })); } catch (e) { toast(e.message, "err"); }
+      };
+      inp.click();
+    };
+    const importPlan = () => pickFile(".xls,.xlsx,.xlsm", "/api/budget/plan/import", (res) => {
+      toast(`Đã nhập ${res.lines} hạng mục, tổng ngân sách duyệt ${(res.total / 1e9).toLocaleString("vi-VN", { maximumFractionDigits: 2 })} tỷ.`);
+      VIEWS.budget(main);
+    });
+    if (!r.has_plan) {
+      main.innerHTML = `<div class="card"><h3>Ngân sách hoạt động ${r.year}</h3>
+        <p class="muted">Chưa có kế hoạch ngân sách. Nhập file "Bản duyệt ngân sách hoạt động ${r.year}" (Excel) để dựng bảng theo dõi. Chỉ lấy sheet TỔNG HỢP, cột tổng duyệt năm ${r.year}; số năm trước không được đưa vào.</p>
+        <button class="primary" id="bk-plan">${icon("upload")}Nhập kế hoạch từ Excel</button></div>`;
+      $("#bk-plan").onclick = importPlan;
+      return;
+    }
+    const m = r.as_of, T = r.totals;
+    const bn = (n) => {  // số tiền ngắn gọn: tỷ / triệu
+      n = Number(n || 0);
+      const a = Math.abs(n);
+      if (a >= 1e9) return (n / 1e9).toLocaleString("vi-VN", { maximumFractionDigits: 2 }) + " tỷ";
+      if (a >= 1e6) return (n / 1e6).toLocaleString("vi-VN", { maximumFractionDigits: 1 }) + " triệu";
+      return fmtNum(Math.round(n)) + " đ";
+    };
+    const dong = (n) => fmtNum(Math.round(n)) + " đ";
+    const tr = (n) => (Math.abs(n) < 0.5 ? "—" : (n / 1e6).toLocaleString("vi-VN", { maximumFractionDigits: 1 }));
+    const pc = (n) => Number(n).toLocaleString("vi-VN", { maximumFractionDigits: 1 }) + "%";
+    const COLOR = { ok: "var(--brand)", pace: "#f2b52e", near: "var(--accent)", over: "var(--danger)", none: "var(--line-2)" };
+    const GAUGE = { ok: "#8fd0ff", pace: "#ffd25e", near: "#ffa24d", over: "#ff6b6b", none: "#8fd0ff" };
+    const SEC_COLORS = ["#004c97", "#2a73c2", "#f47a20", "#0f8a6c", "#6a5fd1", "#f2b52e"];
+    const ST = { over: ["Vượt ngân sách", "bad"], near: ["Sắp vượt", "warn"], pace: ["Vượt tiến độ", "bk-pace"], ok: ["Trong mức", "ok"], none: ["Chưa có NS", ""] };
+    const badge = (i) => (i.status === "ok" || i.status === "none") && !i.spent ? '<span class="muted">—</span>'
+      : `<span class="badge ${ST[i.status][1]}">${ST[i.status][0]}</span>`;
+    const lockTag = (i) => (i.blocked ? `<span class="badge bk-lock">${icon("lock")}Đã chặn</span>` : "");
+    const bar = (i) => `<div class="bk-bar ${i.status}" title="Đã dùng ${i.percent}% · theo tiến độ năm là ${Math.round(m / 12 * 100)}%"><i style="width:${Math.min(i.percent, 100)}%"></i><u style="left:${m / 12 * 100}%"></u></div>`;
+    const why = (i) => (i.status === "over"
+      ? `Chi ${bn(i.spent)} / ${bn(i.plan)}: ${i.plan > 0 ? `vượt ${bn(i.over_by)} (${pc(i.percent)} ngân sách)` : "chưa được duyệt ngân sách"}`
+      : i.status === "near" ? `Đã dùng ${pc(i.percent)} ngân sách, còn ${bn(i.remaining)}`
+      : i.status === "pace" ? `Đã chi ${bn(i.spent)}, cao hơn mức theo tiến độ (${bn(i.expected)} đến T${m})`
+      : `Đã chi ${bn(i.spent)} / ${bn(i.plan)} (${pc(i.percent)})`) + (i.blocked ? ". Đang chặn phát sinh thêm chi phí." : "");
+    const when = (s) => { const [d, t] = String(s).split(" "); const [, mo, da] = d.split("-"); return `${da}/${mo} ${(t || "").slice(0, 5)}`; };
+    const byCode = Object.fromEntries(r.sections.flatMap((s) => s.groups.flatMap((g) => g.lines.map((l) => [l.code, l]))));
+    const all = Object.values(byCode);
+
+    // ---- Vòng đo % sử dụng (trên nền xanh) ----
+    const R = 62, C = 2 * Math.PI * R, tp = Math.min(T.percent, 100), ex = Math.min(m / 12, 1);
+    const ang = ex * 2 * Math.PI - Math.PI / 2;
+    const gauge = `<svg viewBox="0 0 160 160" class="bk-gauge" role="img" aria-label="Đã dùng ${pc(T.percent)} ngân sách">
+      <circle cx="80" cy="80" r="${R}" class="bk-g-track"/>
+      <circle cx="80" cy="80" r="${R}" class="bk-g-arc" stroke="${GAUGE[T.status]}" stroke-dasharray="${(tp / 100) * C} ${C}" transform="rotate(-90 80 80)"/>
+      <circle cx="${80 + R * Math.cos(ang)}" cy="${80 + R * Math.sin(ang)}" r="5" class="bk-g-pace"><title>Mức theo tiến độ năm (T${m}/12)</title></circle>
+      <text x="80" y="82" text-anchor="middle" class="bk-g-num">${Math.round(T.percent)}%</text>
+      <text x="80" y="102" text-anchor="middle" class="bk-g-lbl">đã sử dụng</text></svg>`;
+
+    // ---- Biểu đồ lũy kế: kế hoạch theo tiến độ so với thực chi ----
+    const W = 760, pl = 52, pr = 16, pt = 18, iw = W - pl - pr;
+    const H1 = 270, pb1 = 26, ih1 = H1 - pt - pb1;
+    const ymax = Math.max(T.plan, ...r.monthly.map((x) => x.cum_spent), 1) * 1.08;
+    const X = (k) => pl + ((k - 0.5) / 12) * iw, Y = (v) => pt + ih1 - (v / ymax) * ih1;
+    const dataMonths = r.monthly.filter((x) => x.has_data);
+    const actPts = dataMonths.map((x) => `${X(x.month)},${Y(x.cum_spent)}`);
+    const lastD = dataMonths[dataMonths.length - 1];
+    const paceUp = lastD && lastD.cum_spent > lastD.cum_plan * 1.0;
+    const actColor = lastD && lastD.cum_spent > T.plan ? "var(--danger)" : paceUp ? "var(--accent)" : "var(--brand)";
+    const tickV = [0, 1, 2, 3, 4].map((i) => (ymax / 4) * i);
+    const chart1 = `<svg viewBox="0 0 ${W} ${H1}" class="bk-chart" role="img" aria-label="Chi lũy kế so với ngân sách theo tiến độ">
+      <defs><linearGradient id="bkg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${actColor}" stop-opacity=".35"/><stop offset="1" stop-color="${actColor}" stop-opacity="0"/></linearGradient></defs>
+      ${tickV.map((v) => `<line x1="${pl}" x2="${W - pr}" y1="${Y(v)}" y2="${Y(v)}" class="bk-grid"/><text x="${pl - 8}" y="${Y(v) + 4}" text-anchor="end" class="bk-ax">${(v / 1e9).toLocaleString("vi-VN", { maximumFractionDigits: 0 })}</text>`).join("")}
+      <text x="${pl - 8}" y="${pt - 6}" text-anchor="end" class="bk-ax">tỷ</text>
+      <line x1="${pl}" x2="${W - pr}" y1="${Y(T.plan)}" y2="${Y(T.plan)}" class="bk-cap"/>
+      <text x="${W - pr}" y="${Y(T.plan) - 6}" text-anchor="end" class="bk-cap-t">Ngân sách năm ${bn(T.plan)}</text>
+      <line x1="${X(m)}" x2="${X(m)}" y1="${pt}" y2="${pt + ih1}" class="bk-now"/>
+      <polyline points="${pl},${Y(0)} ${r.monthly.map((x) => `${X(x.month)},${Y(x.cum_plan)}`).join(" ")}" class="bk-plan-line"/>
+      ${actPts.length ? `<polygon points="${X(dataMonths[0].month)},${Y(0)} ${actPts.join(" ")} ${X(lastD.month)},${Y(0)}" fill="url(#bkg)"/>
+        <polyline points="${actPts.join(" ")}" class="bk-act-line" stroke="${actColor}"/>
+        ${dataMonths.map((x) => `<circle cx="${X(x.month)}" cy="${Y(x.cum_spent)}" r="3.5" fill="#fff" stroke="${actColor}" stroke-width="2"/>`).join("")}` : ""}
+      ${r.monthly.map((x) => `<rect x="${pl + ((x.month - 1) / 12) * iw}" y="${pt}" width="${iw / 12}" height="${ih1}" class="bk-hit"><title>Tháng ${x.month}
+Kế hoạch lũy kế: ${bn(x.cum_plan)}
+Thực chi lũy kế: ${x.has_data ? bn(x.cum_spent) : "chưa có số"}</title></rect>
+        <text x="${X(x.month)}" y="${H1 - 8}" text-anchor="middle" class="bk-ax ${x.month === m ? "on" : ""}">T${x.month}</text>`).join("")}</svg>`;
+
+    // ---- Chi theo tháng ----
+    const H2 = 130, pb2 = 24, ih2 = H2 - 22 - pb2, avg = T.plan / 12;
+    const bmax = Math.max(avg, ...r.monthly.map((x) => x.spent)) * 1.15 || 1;
+    const chart2 = `<svg viewBox="0 0 ${W} ${H2}" class="bk-chart" role="img" aria-label="Chi thực tế theo tháng">
+      ${r.monthly.map((x) => {
+        const h = (x.spent / bmax) * ih2, over = x.spent > avg;
+        return `<g><title>Tháng ${x.month}: chi ${bn(x.spent)}${over ? " (cao hơn bình quân kế hoạch)" : ""}</title>
+          <rect x="${X(x.month) - iw / 12 * 0.3}" y="${22 + ih2 - h}" width="${iw / 12 * 0.6}" height="${Math.max(h, x.has_data ? 1.5 : 0)}" rx="5" fill="${over ? "var(--accent)" : "var(--brand)"}" opacity="${x.has_data ? 1 : 0.15}"/>
+          ${x.has_data && x.spent ? `<text x="${X(x.month)}" y="${22 + ih2 - h - 5}" text-anchor="middle" class="bk-val">${bn(x.spent).replace(" ", " ")}</text>` : ""}
+          <text x="${X(x.month)}" y="${H2 - 7}" text-anchor="middle" class="bk-ax ${x.month === m ? "on" : ""}">T${x.month}</text></g>`;
+      }).join("")}
+      <line x1="${pl}" x2="${W - pr}" y1="${22 + ih2 - (avg / bmax) * ih2}" y2="${22 + ih2 - (avg / bmax) * ih2}" class="bk-avg"/>
+      <text x="${pl}" y="12" class="bk-ax">Chi theo tháng · vạch đỏ: bình quân kế hoạch ${bn(avg)}/tháng</text></svg>`;
+
+    // ---- Cơ cấu ngân sách theo nhóm (vòng tròn) ----
+    const DR = 66, DC = 2 * Math.PI * DR, totalPlan = r.sections.reduce((a, s) => a + s.plan, 0) || 1;
+    let acc = 0;
+    const donut = `<svg viewBox="0 0 180 180" class="bk-donut" role="img" aria-label="Cơ cấu ngân sách theo nhóm chi phí">
+      ${r.sections.map((s, k) => {
+        const len = Math.max((s.plan / totalPlan) * DC - 2, 0.5), seg = `<circle cx="90" cy="90" r="${DR}" fill="none" stroke="${SEC_COLORS[k % SEC_COLORS.length]}" stroke-width="26" stroke-dasharray="${len} ${DC}" stroke-dashoffset="${-acc}" transform="rotate(-90 90 90)" class="bk-seg" data-secf="${esc(s.name)}"><title>${esc(s.name)}: ${bn(s.plan)} (${pc(s.plan / totalPlan * 100)})</title></circle>`;
+        acc += (s.plan / totalPlan) * DC;
+        return seg;
+      }).join("")}
+      <text x="90" y="86" text-anchor="middle" class="bk-d-num">${bn(totalPlan)}</text><text x="90" y="104" text-anchor="middle" class="bk-ax">ngân sách năm</text></svg>`;
+
+    // ---- Hạng mục dùng nhiều nhất (hoặc lớn nhất khi chưa có số chi) ----
+    const used = all.filter((i) => i.plan > 0 && i.spent > 0).sort((a, b) => b.percent - a.percent).slice(0, 8);
+    const biggest = [...all].sort((a, b) => b.plan - a.plan).slice(0, 8);
+    const meter = (i) => { const mx = Math.max(120, i.percent); return `<div class="bk-meter" title="${pc(i.percent)}"><i style="width:${Math.min(i.percent, mx) / mx * 100}%;background:${COLOR[i.status]}"></i><u style="left:${80 / mx * 100}%"></u><u class="r" style="left:${100 / mx * 100}%"></u></div>`; };
+    const topList = used.length
+      ? used.map((i) => `<li><div class="bk-top-h"><span title="${esc(i.name)}">${esc(i.name)}</span><b style="color:${COLOR[i.status]}">${pc(i.percent)}</b></div>${meter(i)}</li>`).join("")
+      : biggest.map((i) => `<li><div class="bk-top-h"><span title="${esc(i.name)}">${esc(i.name)}</span><b>${bn(i.plan)}</b></div><div class="bk-meter"><i style="width:${i.plan / biggest[0].plan * 100}%;background:var(--brand-400)"></i></div></li>`).join("");
+
+    // ---- Cần xử lý ----
+    const alerts = r.alerts;
+    const alertHtml = alerts.length ? alerts.map((i) => `
+      <div class="bk-alert ${i.status} ${i.blocked ? "blocked" : ""}">
+        <div class="bk-alert-main">
+          <div class="bk-tags">${i.status === "over" || i.status === "near" || i.status === "pace" ? `<span class="badge ${ST[i.status][1]}">${ST[i.status][0]}</span>` : ""}${lockTag(i)}${i.supplement ? `<span class="badge brand">+${bn(i.supplement)} đã duyệt</span>` : ""}</div>
+          <b>${esc(i.name)}</b>
+          <small class="muted">${esc(i.code)} · ${esc(i.section)}</small>
+          ${meter(i)}
+          <p>${esc(why(i))}</p></div>
+        <div class="bk-alert-act">
+          ${i.status === "over" || i.status === "near" || i.blocked ? `<button class="bk-btn supp" data-act="supp" data-code="${esc(i.code)}">${icon("plus")}Duyệt bổ sung</button>` : ""}
+          ${i.blocked ? `<button class="bk-btn go" data-act="unblock" data-code="${esc(i.code)}">${icon("check")}Cho tiếp tục</button>`
+            : `<button class="bk-btn stop" data-act="block" data-code="${esc(i.code)}">${icon("lock")}Chặn phát sinh</button>`}
+          <button class="bk-btn quiet" data-act="edit" data-code="${esc(i.code)}" title="Nhập chi thực tế">${icon("edit")}</button></div></div>`).join("")
+      : `<div class="empty">${r.last_data_month ? "Chưa có hạng mục nào vượt, sắp vượt hoặc bị chặn." : "Chưa có số chi thực tế nên chưa có cảnh báo."}</div>`;
+    const KIND = { supplement: ["Duyệt bổ sung", "k-supp"], block: ["Chặn phát sinh", "k-stop"], unblock: ["Cho tiếp tục", "k-go"] };
+    const log = r.decisions.length ? `<ul class="bk-log">${r.decisions.map((d) => `<li class="${KIND[d.kind][1]}"><span class="dot"></span><div>
+        <b>${KIND[d.kind][0]}${d.amount ? ` ${bn(d.amount)}` : ""}</b> · ${esc(d.name || d.code)}
+        <small>${d.note ? esc(d.note) + " · " : ""}${esc(d.by_name || "—")} · ${when(d.decided_at)}</small></div></li>`).join("")}</ul>`
+      : '<div class="empty">Chưa có quyết định nào.</div>';
+
+    main.innerHTML = `<div id="bk-root">
+      <section class="bk-hero">
+        <div class="bk-hero-top">
+          <div><span class="bk-eyebrow">Ngân sách hoạt động</span><h2>Năm ${r.year}</h2>
+            <p>Lũy kế đến tháng ${m} so với ngân sách tổng duyệt${T.supplement ? ` (đã gồm ${bn(T.supplement)} TGĐ duyệt bổ sung)` : ""}. Vàng từ ${r.warn_pct}%, đỏ khi vượt 100%.</p></div>
+          <div class="bk-actions">
+            <select id="bk-month" class="bk-glass" aria-label="Chi lũy kế đến tháng">${[...Array(12)].map((_, k) => `<option value="${k + 1}" ${k + 1 === m ? "selected" : ""}>Đến tháng ${k + 1}</option>`).join("")}</select>
+            <a class="bk-glass" href="/api/budget/actuals/template" download>${icon("download")}File mẫu</a>
+            <a class="bk-glass" href="/api/budget/export?month=${m}" download>${icon("file")}Xuất Excel</a>
+            <button class="bk-glass" id="bk-print">${icon("file")}In / PDF</button>
+            <button class="bk-glass" id="bk-act">${icon("upload")}Nhập chi thực tế</button>
+            <button class="bk-glass" id="bk-plan">${icon("file")}Cập nhật kế hoạch</button></div></div>
+        <div class="bk-hero-body">
+          ${gauge}
+          <div class="bk-hero-nums">
+            <div><span>Ngân sách hiệu lực</span><b>${bn(T.plan)}</b><small>Bình quân ${bn(T.plan / 12)}/tháng</small></div>
+            <div><span>Đã chi lũy kế (T1–T${m})</span><b>${bn(T.spent)}</b><small>Theo tiến độ năm là ${bn(T.expected)}</small></div>
+            <div><span>Còn lại</span><b class="${T.remaining < 0 ? "neg" : ""}">${bn(T.remaining)}</b><small>${Math.max(0, 12 - m)} tháng còn lại trong năm</small></div></div>
+          <div class="bk-chips">
+            <span class="bk-chip over ${T.over ? "" : "zero"}"><b>${T.over}</b>Vượt ngân sách</span>
+            <span class="bk-chip near ${T.near ? "" : "zero"}"><b>${T.near}</b>Sắp vượt</span>
+            <span class="bk-chip pace ${T.pace ? "" : "zero"}"><b>${T.pace}</b>Vượt tiến độ</span>
+            <span class="bk-chip lock ${T.blocked ? "" : "zero"}"><b>${T.blocked}</b>Đang bị chặn</span></div></div>
+        ${r.last_data_month ? "" : `<div class="bk-cta"><div><b>Chưa có số chi thực tế</b><span>Tải file mẫu, điền chi theo tháng rồi nhập vào để bắt đầu theo dõi và nhận cảnh báo. Cũng có thể bấm biểu tượng bút ở từng hạng mục bên dưới.</span></div>
+          <a class="bk-cta-btn ghost" href="/api/budget/actuals/template" download>${icon("download")}Tải file mẫu</a>
+          <button class="bk-cta-btn" id="bk-cta-act">${icon("upload")}Nhập chi thực tế</button></div>`}
+      </section>
+      <div class="bk-grid-2">
+        <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("chart")}</span>Chi lũy kế so với ngân sách<span class="sub">Đường nét đứt là mức chi nếu đi đúng tiến độ năm</span></h3>
+          <div class="bk-legend"><span><i style="background:${actColor}"></i>Thực chi</span><span><i class="dash"></i>Theo tiến độ</span></div></div>
+          ${chart1}${r.last_data_month ? chart2 : ""}</div>
+        <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("layers")}</span>Cơ cấu ngân sách<span class="sub">Theo nhóm chi phí, kèm mức đã dùng</span></h3></div>
+          ${donut}
+          <ul class="bk-donut-legend">${r.sections.map((s, k) => `<li class="bk-dl ${state.bkSection === s.name ? "on" : ""}" data-secf="${esc(s.name)}" title="Bấm để chỉ xem nhóm này trong bảng chi tiết"><span class="sw" style="background:${SEC_COLORS[k % SEC_COLORS.length]}"></span>
+            <div><div class="bk-dl-h"><span>${esc(s.name)}</span><b style="color:${COLOR[s.status]}">${pc(s.percent)}</b></div>
+            <small class="muted">${bn(s.spent)} / ${bn(s.plan)} · ${pc(s.plan / totalPlan * 100)} tổng ngân sách</small>${bar(s)}</div></li>`).join("")}</ul></div>
+      </div>
+      <div class="bk-grid-3">
+        <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("alert")}</span>Cần xử lý<span class="sub">Tổng Giám đốc duyệt bổ sung hoặc chặn không cho phát sinh thêm</span></h3></div>
+          <div class="bk-alerts">${alertHtml}</div></div>
+        <div class="bk-side">
+          <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("target")}</span>${used.length ? "Mức sử dụng cao nhất" : "Hạng mục lớn nhất"}</h3></div>
+            <ul class="bk-top">${topList}</ul>${used.length ? '<p class="muted bk-note"><u class="a"></u>80% <u class="b"></u>100% ngân sách</p>' : ""}</div>
+          <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("shield")}</span>Quyết định gần đây</h3></div>${log}</div></div>
+      </div>
+      <div class="card">
+        <div class="toolbar bk-toolbar"><h3 style="margin:0">Chi tiết theo hạng mục <span class="muted" style="font-weight:400;font-size:13px">(triệu đồng)</span> <span id="bk-secchip"></span></h3>
+          <div class="btn-group"><input type="search" id="bk-q" class="pill-select" style="min-width:260px" placeholder="Tìm mã hoặc tên hạng mục..." value="${esc(state.bkQuery || "")}">
+            <select id="bk-filter" class="pill-select">${[["", "Tất cả hạng mục"], ["alert", "Có cảnh báo"], ["over", "Chỉ vượt ngân sách"], ["near", "Chỉ sắp vượt"], ["blocked", "Đang bị chặn"], ["spent", "Đã có chi"]]
+              .map(([v, l]) => `<option value="${v}" ${v === (state.bkFilter || "") ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
+        <div class="bk-scroll"><table class="bk-table"><thead><tr><th>Hạng mục</th><th class="num">Ngân sách</th><th class="num">Đã chi</th><th class="num">Còn lại</th><th style="width:150px">Mức sử dụng</th><th>Trạng thái</th><th></th></tr></thead>
+        <tbody id="bk-body"></tbody></table></div>
+      </div></div>`;
+
+    const plain = (s) => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D").toLowerCase();
+    if (!state.bkOpen) state.bkOpen = new Set(r.sections.filter((s) => s.over + s.near + s.pace + s.blocked > 0).map((s) => s.name));
+    const drawBody = () => {
+      const q = plain(state.bkQuery || "").trim(), f = state.bkFilter || "";
+      const pass = (i) => (!q || plain(i.code + " " + i.name).includes(q))
+        && (!f || (f === "alert" ? ["over", "near", "pace"].includes(i.status) : f === "spent" ? i.spent > 0 : f === "blocked" ? i.blocked : i.status === f));
+      const forced = !!(q || f || state.bkSection || state.bkPrintOpen);
+      let html = "";
+      for (const s of r.sections) {
+        if (state.bkSection && s.name !== state.bkSection) continue;
+        const groups = s.groups.map((g) => ({ g, lines: g.lines.filter(pass) })).filter((x) => x.lines.length);
+        if (!groups.length) continue;
+        const open = forced || state.bkOpen.has(s.name);
+        html += `<tr class="bk-sec" data-sec="${esc(s.name)}"><td><span class="bk-caret ${open ? "open" : ""}">${icon("chev")}</span><b>${esc(s.name)}</b></td>
+          <td class="num">${tr(s.plan)}</td><td class="num">${tr(s.spent)}</td><td class="num ${s.remaining < 0 ? "neg" : ""}">${tr(s.remaining)}</td><td>${bar(s)}</td><td>${badge(s)}</td><td></td></tr>`;
+        if (!open) continue;
+        for (const { g, lines } of groups) {
+          if (g.name) html += `<tr class="bk-grp"><td>${esc(g.name)}</td><td class="num">${tr(g.plan)}</td><td class="num">${tr(g.spent)}</td><td class="num ${g.remaining < 0 ? "neg" : ""}">${tr(g.remaining)}</td><td></td><td></td><td></td></tr>`;
+          html += lines.map((i) => `<tr class="bk-line ${i.status}"><td><span class="bk-code">${esc(i.code)}</span>${esc(i.name)} ${lockTag(i)}${i.note ? `<small class="muted">${esc(i.note)}</small>` : ""}</td>
+            <td class="num" title="${dong(i.plan)}${i.supplement ? ` (gốc ${dong(i.base_plan)} + bổ sung ${dong(i.supplement)})` : ""}">${tr(i.plan)}${i.supplement ? `<small class="bk-plus">+${tr(i.supplement)}</small>` : ""}</td><td class="num" title="${dong(i.spent)}">${tr(i.spent)}</td>
+            <td class="num ${i.remaining < 0 ? "neg" : ""}">${i.plan || i.spent ? tr(i.remaining) : "—"}</td><td>${i.plan || i.spent ? bar(i) : ""}</td><td>${badge(i)}</td>
+            <td class="bk-row-act"><button class="icon-btn" data-act="edit" data-code="${esc(i.code)}" title="Nhập chi thực tế" aria-label="Nhập chi thực tế ${esc(i.code)}">${icon("edit")}</button>
+              <button class="icon-btn" data-act="menu" data-code="${esc(i.code)}" title="Duyệt bổ sung / chặn phát sinh" aria-label="Quyết định ngân sách ${esc(i.code)}">${icon("shield")}</button></td></tr>`).join("");
+        }
+      }
+      $("#bk-secchip").innerHTML = state.bkSection ? `<button class="bk-secchip" data-secf="" title="Bỏ lọc nhóm">${esc(state.bkSection)} ${icon("plus")}</button>` : "";
+      document.querySelectorAll("#bk-root .bk-dl").forEach((li) => li.classList.toggle("on", li.dataset.secf === state.bkSection));
+      $("#bk-body").innerHTML = html || '<tr><td colspan="7"><div class="empty">Không có hạng mục nào khớp.</div></td></tr>';
+      hydrateIcons($("#bk-body"));
+    };
+    drawBody();
+
+    const editLine = (code) => {
+      const i = byCode[code];
+      if (!i) return;
+      openForm(`Chi thực tế · ${i.code}`, [
+        { type: "info", label: `${i.name}. Ngân sách ${dong(i.plan)}; đã chi lũy kế đến T${m}: ${dong(i.spent)}. Nhập số tiền (đồng) của từng tháng; để trống là chưa có số.${i.blocked ? " Hạng mục đang bị chặn: chỉ sửa giảm được, không ghi thêm chi." : ""}` },
+        ...i.months.map((_, k) => ({ name: `m${k + 1}`, label: `Tháng ${k + 1}`, type: "number", placeholder: "0" })),
+      ], Object.fromEntries(i.months.map((v, k) => [`m${k + 1}`, v])), async (d) => {
+        const months = Object.fromEntries(i.months.map((_, k) => [String(k + 1), d[`m${k + 1}`] === "" || d[`m${k + 1}`] == null ? null : Number(d[`m${k + 1}`])]));
+        await api(`/api/budget/lines/${encodeURIComponent(code)}/actuals`, { method: "PUT", body: { months } });
+        toast("Đã lưu số chi thực tế");  // openForm tự vẽ lại trang sau khi lưu
+      });
+    };
+    const decision = (code, body) => api(`/api/budget/lines/${encodeURIComponent(code)}/decision`, { method: "POST", body });
+    const supplement = (code) => {
+      const i = byCode[code];
+      const hint = i.over_by > 0 ? Math.ceil(i.over_by / 1e6) * 1e6 : "";
+      openForm(`Duyệt bổ sung ngân sách · ${i.code}`, [
+        { type: "info", label: `${i.name}. Ngân sách hiện tại ${dong(i.plan)}, đã chi ${dong(i.spent)}${i.over_by > 0 ? `, đang vượt ${dong(i.over_by)}` : ""}. Số tiền duyệt được cộng thẳng vào ngân sách của hạng mục này${i.blocked ? " và hạng mục được gỡ chặn" : ""}.` },
+        { name: "amount", label: "Số tiền bổ sung (đồng)", type: "number", required: true, placeholder: i.over_by > 0 ? "Gợi ý: đủ bù phần đang vượt" : "" },
+        { name: "note", label: "Lý do duyệt (bắt buộc)", type: "textarea", required: true, placeholder: "Ví dụ: giá xăng tăng, phát sinh sự kiện..." },
+      ], { amount: hint }, async (d) => {
+        await decision(code, { kind: "supplement", amount: d.amount, note: d.note });
+        toast(`Đã duyệt bổ sung ${bn(d.amount)} cho ${i.code}`);
+      }, "Duyệt bổ sung");
+    };
+    const block = (code) => {
+      const i = byCode[code];
+      openForm(`Chặn phát sinh · ${i.code}`, [
+        { type: "info", label: `${i.name}. Sau khi chặn, hệ thống không cho ghi thêm chi phí cho hạng mục này (chỉ cho sửa giảm), cho đến khi TGĐ duyệt bổ sung hoặc cho tiếp tục.` },
+        { name: "note", label: "Lý do chặn (không bắt buộc)", type: "textarea" },
+      ], {}, async (d) => { await decision(code, { kind: "block", note: d.note }); toast(`Đã chặn phát sinh ${i.code}`); }, "Chặn phát sinh");
+    };
+    const unblock = async (code) => {
+      const i = byCode[code];
+      if (!(await ask({ title: `Cho ${i.code} tiếp tục phát sinh?`, message: `${i.name}. Hạng mục được ghi thêm chi phí trở lại, kể cả khi đã vượt ngân sách.`, okText: "Cho tiếp tục" }))) return;
+      try { await decision(code, { kind: "unblock", note: "Cho tiếp tục" }); toast(`Đã cho ${i.code} tiếp tục`); render(); } catch (e) { toast(e.message, "err"); }
+    };
+    const menu = async (code) => {
+      const i = byCode[code];
+      const pick = await askChoice({ title: `${i.code} · ${i.name}`, message: "Quyết định của Tổng Giám đốc với hạng mục này:", options: [
+        { label: "Duyệt bổ sung ngân sách", value: "supp", primary: true },
+        i.blocked ? { label: "Cho tiếp tục phát sinh", value: "unblock" } : { label: "Chặn phát sinh", value: "block", danger: true },
+        { label: "Đóng", value: null }] });
+      if (pick === "supp") supplement(code); else if (pick === "block") block(code); else if (pick === "unblock") unblock(code);
+    };
+    const ACTS = { edit: editLine, supp: supplement, block, unblock, menu };
+    $("#bk-root").onclick = (e) => {
+      const sf = e.target.closest("[data-secf]");
+      if (sf) {  // bấm nhóm trong biểu đồ vòng: bảng chi tiết chỉ hiện nhóm đó; bấm lại hoặc bấm chip để bỏ lọc
+        const n = sf.dataset.secf;
+        state.bkSection = !n || n === state.bkSection ? null : n;
+        drawBody();
+        if (state.bkSection) $("#bk-body").closest(".card").scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      const b = e.target.closest("[data-act]");
+      if (b) return ACTS[b.dataset.act]?.(b.dataset.code);
+      const sec = e.target.closest(".bk-sec");
+      if (sec) { const n = sec.dataset.sec; state.bkOpen.has(n) ? state.bkOpen.delete(n) : state.bkOpen.add(n); drawBody(); }
+    };
+    $("#bk-q").oninput = (e) => { state.bkQuery = e.target.value; drawBody(); };
+    $("#bk-filter").onchange = (e) => { state.bkFilter = e.target.value; drawBody(); };
+    $("#bk-month").onchange = (e) => { state.bkMonth = Number(e.target.value); VIEWS.budget(main); };
+    $("#bk-plan").onclick = importPlan;
+    $("#bk-print").onclick = () => window.print();
+    // In / lưu PDF: mở hết các nhóm trong bảng để báo cáo đủ hạng mục, in xong trả lại như cũ
+    state.bkPrint = { before: () => { state.bkPrintOpen = true; drawBody(); }, after: () => { state.bkPrintOpen = false; drawBody(); } };
+    const pickActuals = () => pickFile(".xlsx,.xlsm,.csv", "/api/budget/actuals/import", (res) => {
+      const skipped = [res.unknown.length ? `mã không có trong kế hoạch: ${res.unknown.slice(0, 5).join(", ")}` : "", res.blocked.length ? `hạng mục đang bị chặn: ${res.blocked.slice(0, 5).join(", ")}` : ""].filter(Boolean);
+      toast(`Đã nhập ${res.entries} ô số chi của ${res.lines} hạng mục.` + (skipped.length ? ` Bỏ qua ${skipped.join("; ")}.` : ""), skipped.length ? "err" : "ok");
+      state.bkMonth = null;
+      VIEWS.budget(main);
+    });
+    $("#bk-act").onclick = pickActuals;
+    if ($("#bk-cta-act")) $("#bk-cta-act").onclick = pickActuals;
+  },
+
+  async aicost(main) {
+    const days = state.aicostDays || 7;
+    const r = await api(`/api/ai/cost?days=${days}`);
+    // Kiểu của trang thanh toán Anthropic: 2 số lẻ, dấu phẩy thập phân, hậu tố US$; dưới 1 cent hiện "< 0,01 US$"
+    const usd = (n) => {
+      n = Number(n || 0);
+      return n > 0 && n < 0.01 ? "< 0,01 US$" : n.toLocaleString("vi-VN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " US$";
+    };
+    const KIND = { chat: "Chat với trợ lý", ocr_pdf: "Đọc PDF scan (OCR)", ocr_image: "Đọc ảnh (OCR)", verify_scan: "Đối chiếu bản scan",
+      web_summary: "Tóm tắt trang web", memory: "Ghi chú / việc nền" };
+    const max = Math.max(0.0001, ...r.daily.map((d) => d.cost_usd));
+    const limitNote = r.daily_limit_usd > 0 ? `Trần công ty ${usd(r.daily_limit_usd)}/ngày` : "Không đặt trần công ty";
+    main.innerHTML = `
+      <div class="card">
+        <div class="toolbar"><h3 style="margin:0">Chi phí AI</h3>
+          <select id="aic-days" class="pill-select">${[7, 14, 30, 90].map((n) => `<option value="${n}" ${n === days ? "selected" : ""}>${n} ngày gần nhất</option>`).join("")}</select></div>
+        <p class="muted">Số tiền là ước tính theo bảng giá trong hệ thống, không phải hóa đơn của nhà cung cấp. Trần reset lúc 0 giờ mỗi ngày.</p>
+        ${r.credit ? `<div class="credit-box"><div class="stat-row">
+            <div><b>${usd(r.credit.remaining_usd)}</b><span>Số dư còn lại (ước tính)</span></div>
+            <div><b>${usd(r.credit.used_usd)}</b><span>Đã dùng${r.credit.since ? " từ " + esc(r.credit.since) : " toàn bộ từ trước đến nay"}</span></div>
+            <div><b>${usd(r.credit.total_usd)}</b><span>Đã nạp</span></div></div>
+          <div class="quota-bar ${r.credit.percent_used >= 100 ? "full" : r.credit.percent_used >= 80 ? "warn" : ""}"><i style="width:${r.credit.percent_used}%"></i></div>
+          <p class="muted">${r.credit.percent_used}% số tiền đã nạp đã dùng${r.credit.remaining_usd <= 0 ? " — đã hết, hãy nạp thêm ở console.anthropic.com" : ""}. Số dư thật xem ở console.anthropic.com.</p></div>`
+          : `<p class="muted">Muốn xem số dư còn lại, đặt AZB_CREDIT_USD (số tiền đã nạp, ví dụ 20) trong file .env rồi khởi động lại.</p>`}
+        <div class="stat-row">
+          <div><b>${usd(r.today_usd)}</b><span>Hôm nay · ${limitNote}</span></div>
+          <div><b>${usd(r.total_usd)}</b><span>Tổng ${r.days} ngày</span></div>
+          <div><b>${usd(r.total_usd / r.days)}</b><span>Trung bình mỗi ngày</span></div>
+          <div><b>${usd(r.all_time.cost_usd)}</b><span>Tổng đã dùng${r.all_time.since ? " từ " + esc(r.all_time.since) : ""} · ${fmtNum(r.all_time.calls)} lượt · ${fmtNum(r.all_time.input_tokens)} token vào · ${fmtNum(r.all_time.output_tokens)} token ra</span></div>
+        </div>
+      </div>
+      <div class="card"><h3>Theo ngày</h3>
+        ${r.daily.length ? `<table><tr><th>Ngày</th><th class="num">Lượt gọi</th><th class="num">Token vào</th><th class="num">Token ra</th><th class="num">Chi phí</th><th style="width:30%"></th></tr>
+          ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td class="num">${fmtNum(d.calls)}</td><td class="num">${fmtNum(d.input_tokens)}</td>
+            <td class="num">${fmtNum(d.output_tokens)}</td><td class="num">${usd(d.cost_usd)}</td>
+            <td><div class="quota-bar"><i style="width:${Math.round((d.cost_usd / max) * 100)}%"></i></div></td></tr>`).join("")}</table>`
+          : '<div class="empty">Chưa có lượt gọi AI nào trong khoảng này.</div>'}
+      </div>
+      <div class="card"><h3>Theo người dùng</h3>
+        ${r.by_user.length ? `<table><tr><th>Người dùng</th><th class="num">Lượt gọi</th><th class="num">Chi phí</th></tr>
+          ${r.by_user.map((u) => `<tr><td>${esc(u.name)}</td><td class="num">${fmtNum(u.calls)}</td><td class="num">${usd(u.cost_usd)}</td></tr>`).join("")}</table>`
+          : '<div class="empty">Chưa có dữ liệu.</div>'}
+      </div>
+      <div class="card"><h3>Theo loại việc và model</h3>
+        ${r.by_kind.length ? `<table><tr><th>Loại việc</th><th>Model</th><th class="num">Lượt gọi</th><th class="num">Chi phí</th></tr>
+          ${r.by_kind.map((k) => `<tr><td>${esc(KIND[k.kind] || k.kind)}</td><td class="muted">${esc(k.model || "—")}</td>
+            <td class="num">${fmtNum(k.calls)}</td><td class="num">${usd(k.cost_usd)}</td></tr>`).join("")}</table>`
+          : '<div class="empty">Chưa có dữ liệu.</div>'}
+      </div>`;
+    $("#aic-days").onchange = (e) => { state.aicostDays = Number(e.target.value); VIEWS.aicost(main); };
   },
 
   async myfiles(main) {
@@ -2309,6 +2948,7 @@ const VIEWS = {
     if (state.chatId && !convs.some((c) => c.id === state.chatId)) state.chatId = null;
     const canAttach = !!state.user.can_use_ai;  // file đính kèm lưu ở kho riêng của từng tài khoản (không vào thư viện chung)
     const attachMeta = canAttach ? await api("/api/my-files/meta").catch(() => null) : null;
+    state.quota = (await api("/api/ai/quota").catch(() => null))?.quota ?? null;
     main.innerHTML = `
       <div class="cg ${(state.chatSidebar ?? !matchMedia("(max-width: 960px)").matches) ? "" : "side-closed"}" id="cg">
         <aside class="cg-side">
@@ -2348,6 +2988,7 @@ const VIEWS = {
               </div>` : ""}
               <button class="cg-send" id="send" type="submit" title="Gửi (Enter)">↑</button>
             </form>
+            <div class="cg-meter" id="cg-meter"></div>
             <div class="cg-quota" id="cg-quota"></div>
             <div class="cg-hint">Enter để gửi · Shift+Enter xuống dòng · AI có thể sai, hãy kiểm tra lại số liệu quan trọng</div>
           </div>
@@ -2355,6 +2996,7 @@ const VIEWS = {
       </div>`;
 
     const log = $("#log"), q = $("#q");
+    drawAiMeter();
     // Chọn model: menu tuỳ biến (thay cho <select> gốc), nhớ lựa chọn trên trình duyệt này
     let chatModel = null;
     let modelLocked = false;  // đã chọn model (ở ô chọn hoặc trả lời hộp hỏi nâng model) trong đoạn chat này: không hỏi nâng nữa
@@ -2811,10 +3453,23 @@ const VIEWS = {
   },
 };
 
+// Thanh hạn mức AI hôm nay trong ô chat: chỉ hiện phần trăm đã dùng và thời gian còn lại đến lúc reset, không hiện số tiền
+function drawAiMeter() {
+  const el = $("#cg-meter"), q = state.quota;
+  if (!el) return;
+  if (!q) { el.className = "cg-meter"; el.innerHTML = ""; return; }
+  const h = Math.max(1, Math.round(q.resets_in_seconds / 3600));
+  el.className = "cg-meter" + (q.percent >= 100 ? " full" : q.percent >= 80 ? " warn" : "");
+  el.innerHTML = `<span>Hạn mức AI hôm nay</span><div class="quota-bar ${q.percent >= 100 ? "full" : q.percent >= 80 ? "warn" : ""}"><i style="width:${q.percent}%"></i></div>
+    <span>${q.percent}% đã dùng · đặt lại sau ${h} giờ</span>`;
+  el.title = q.scope === "company" ? "Ngân sách chung của công ty" : "Ngân sách cá nhân của bạn";
+}
+
 // Câu trả lời về tới dù người dùng đang xem đoạn chat khác hay trang khác: chỉ cập nhật màn hình nếu đúng đoạn đang xem
 async function finishJob(job, res) {
   const viewing = state.chatJob === job.token || (job.convId != null && state.chatId === job.convId && !state.chatJob);
   state.jobs.delete(job.token);
+  if (res.quota !== undefined) { state.quota = res.quota; drawAiMeter(); }
   const ok = !res.error;
   if (ok && job.convId == null) {
     job.convId = res.conversation_id;
@@ -2826,7 +3481,7 @@ async function finishJob(job, res) {
   if (viewing) {
     const pending = $("#pending");
     if (pending) {
-      pending.outerHTML = msgHtml({ role: "assistant", content: res.answer, tools: res.tools_used, error: !!res.error });
+      pending.outerHTML = msgHtml({ role: "assistant", content: res.answer, tools: res.tools_used, error: !!res.error, usage: res.usage });
       if (!ok) ui.q.value = job.text; // trả lại câu hỏi để gửi lại
       ui.scroll();
     } else if (ok) await ui.open(job.convId);
@@ -2866,7 +3521,7 @@ const TOOL_LABELS = {
   list_documents: "kho tài liệu",
   search_documents: "tìm trong tài liệu",
   read_document: "nội dung tài liệu",
-  list_targets: "mục tiêu doanh thu",
+  list_targets: "mục tiêu trọng yếu",
   tao_file: "tạo file",
 };
 
@@ -2888,7 +3543,9 @@ function msgHtml(m) {
   const labels = [...new Set((m.tools || []).map((t) => TOOL_LABELS[t] || "dữ liệu công ty"))];
   const tools = labels.length ? `<div class="tools">Đã tra cứu: ${labels.map(esc).join(", ")}</div>` : "";
   const save = m.error ? "" : `<div class="msg-actions"><button class="link save-prop">Lưu thành đề xuất</button></div>`;
-  return `<div class="msg assistant ${m.error ? "error" : ""}"><div class="av">AZB</div><div class="body">${body}${tools}${save}</div></div>`;
+  const u = m.usage;  // chỉ quản trị/TGĐ nhận được (server không gửi cho người khác); lượt đã lưu từ trước không có
+  const used = u ? `<div class="msg-usage" title="Ước tính theo bảng giá, không phải hóa đơn">${fmtNum((u.input || 0) + (u.cache_read || 0) + (u.cache_write || 0))} token vào · ${fmtNum(u.output || 0)} token ra · ~$${Number(u.cost_usd || 0).toFixed(4)}</div>` : "";
+  return `<div class="msg assistant ${m.error ? "error" : ""}"><div class="av">AZB</div><div class="body">${body}${tools}${used}${save}</div></div>`;
 }
 
 // ---------------- Tab trong trang đơn vị ----------------
@@ -2903,7 +3560,7 @@ const UNIT_TABS = {
           ${u.positions.map((p) => `
             <tr>
               <td>${esc(p.title)} ${p.title_code ? `<span class="badge">${esc(p.title_code)}</span>` : ""} ${p.is_head ? '<span class="badge ok">Phụ trách</span>' : ""}</td>
-              <td>${p.employee_name ? esc(p.employee_name) + (p.employee_verified ? "" : ' <span class="badge warn">?</span>') : '<span class="badge warn">TBA – đang trống</span>'}</td>
+              <td>${p.employee_name ? esc(p.employee_name) + (p.employee_verified ? "" : ' <span class="badge warn">?</span>') : '<span class="badge warn">TBA – đang trống</span>'}${p.reports_to_name ? `<div class="muted small">báo cáo ${esc(p.reports_to_name)}</div>` : ""}</td>
               <td class="num">${p.headcount}</td>
               <td class="muted">${esc(p.notes || "")}</td>
               <td><button class="link" data-edit="${p.id}">Sửa</button> · <button class="link danger" data-del="${p.id}">Xoá</button></td>
@@ -2911,23 +3568,50 @@ const UNIT_TABS = {
         </table>` : '<div class="empty">Chưa có chức danh nào.</div>'}
       ${(() => {
         const members = sortByRank(emps.filter((e) => e.unit_id === u.id && e.status !== "inactive"));
+        // Người phụ trách lấy theo chức danh đã đánh dấu ở bảng trên; chỉ khi đơn vị chưa đánh dấu ai mới suy theo ngạch
+        const headIds = new Set(u.positions.filter((p) => p.is_head && p.employee_id).map((p) => p.employee_id));
+        const isHeadRow = (e, i) => (headIds.size ? headIds.has(e.id) : i === 0 && isManager(e));
         return members.length ? `
           <h3 style="margin-top:20px">Nhân sự theo danh sách HCNS (${members.length})</h3>
           <table>
             <tr><th style="width:90px">Mã NV</th><th>Họ tên</th><th>Chức danh</th><th>Ngạch</th></tr>
             ${members.map((e, i) => `<tr><td><span class="badge">${esc(e.employee_code || "")}</span></td>
-              <td><b>${esc(e.full_name)}</b> ${i === 0 && isManager(e) ? '<span class="badge ok">Phụ trách</span>' : ""}</td>
+              <td><b>${esc(e.full_name)}</b> ${isHeadRow(e, i) ? '<span class="badge ok">Phụ trách</span>' : ""}</td>
               <td>${esc(e.job_title || "")}</td><td class="muted">${esc(e.grade || "")}</td></tr>`).join("")}
           </table>` : "";
       })()}
       <h3 style="margin-top:20px">Đơn vị trực thuộc</h3>
-      ${u.children.length ? u.children.map((c) => `<button class="ghost" style="margin:0 6px 6px 0" onclick="go('units',{unitId:${c.id}})">${esc(c.name)}</button>`).join("")
-        : '<div class="muted">Không có.</div>'}`;
+      ${u.children.length ? u.children.map((c) => `<button class="ghost child-btn" style="margin:0 6px 6px 0" data-child="${c.id}">${esc(c.name)}</button>`).join("")
+        : '<div class="muted">Không có.</div>'}
+      <div id="child-detail"></div>`;
+    // Bấm đơn vị trực thuộc: xổ thông tin ngay bên dưới, không chuyển tab; bấm lại để thu gọn
+    const childBox = $("#child-detail");
+    body.querySelectorAll("[data-child]").forEach((b) => (b.onclick = async () => {
+      const id = Number(b.dataset.child);
+      if (b.classList.contains("active")) { b.classList.remove("active"); childBox.innerHTML = ""; return; }
+      body.querySelectorAll("[data-child]").forEach((x) => x.classList.toggle("active", x === b));
+      const c = await api(`/api/units/${id}`);
+      const members = sortByRank(emps.filter((e) => e.unit_id === id && e.status !== "inactive"));
+      childBox.innerHTML = `
+        <div class="card" style="margin-top:10px">
+          <div class="toolbar"><b>${esc(c.name)}</b><button class="link" onclick="go('units',{unitId:${id}})">Mở trang đơn vị</button></div>
+          ${c.positions.length ? `<table>
+            <tr><th>Chức danh</th><th>Người giữ</th><th>Định biên</th></tr>
+            ${c.positions.map((p) => `<tr><td>${esc(p.title)} ${p.is_head ? '<span class="badge ok">Phụ trách</span>' : ""}</td>
+              <td>${p.employee_name ? esc(p.employee_name) : '<span class="badge warn">TBA – đang trống</span>'}${p.reports_to_name ? `<div class="muted small">báo cáo ${esc(p.reports_to_name)}</div>` : ""}</td><td class="num">${p.headcount}</td></tr>`).join("")}
+          </table>` : '<div class="muted">Chưa có chức danh.</div>'}
+          ${members.length ? `<h4 style="margin:12px 0 6px">Nhân sự (${members.length})</h4><table>
+            <tr><th style="width:90px">Mã NV</th><th>Họ tên</th><th>Chức danh</th></tr>
+            ${members.map((e) => `<tr><td><span class="badge">${esc(e.employee_code || "")}</span></td><td><b>${esc(e.full_name)}</b></td><td>${esc(e.job_title || "")}</td></tr>`).join("")}
+          </table>` : ""}
+        </div>`;
+    }));
     const form = (p) => openForm(p.id ? "Sửa chức danh" : "Thêm chức danh", [
       { name: "title", label: "Chức danh", required: true, placeholder: "VD: Trưởng phòng" },
       { name: "title_code", label: "Mã chức danh", placeholder: "TP, PP, GĐ, NV..." },
-      { name: "employee_id", label: "Người giữ", type: "select", numeric: true, options: [["", "— Đang trống (TBA) —"], ...emps.map((e) => [e.id, e.full_name])] },
+      { name: "employee_id", label: "Người giữ", type: "select", search: true, placeholder: "Gõ tên nhân sự để tìm (để trống = đang trống)...", numeric: true, options: [["", "— Đang trống (TBA) —"], ...emps.map((e) => [e.id, e.full_name])] },
       { name: "is_head", label: "Là người phụ trách đơn vị?", type: "select", numeric: true, options: [[0, "Không"], [1, "Có"]] },
+      { name: "reports_to_employee_id", label: "Báo cáo cho", type: "select", search: true, placeholder: "Gõ tên để tìm (để trống = theo cây tổ chức)...", numeric: true, options: [["", "— Theo cây tổ chức —"], ...emps.map((e) => [e.id, e.full_name])] },
       { name: "headcount", label: "Định biên", type: "number", default: 1 },
       { name: "notes", label: "Ghi chú", type: "textarea" },
     ], p, (data) => (p.id ? api(`/api/positions/${p.id}`, { method: "PUT", body: data }) : api("/api/positions", { method: "POST", body: { ...data, unit_id: u.id } })));
@@ -2975,7 +3659,7 @@ const UNIT_TABS = {
 
   target(body, u) {
     body.innerHTML = `
-      <div class="toolbar"><h3 style="margin:0">Mục tiêu doanh thu, doanh số</h3><button class="primary" id="add-tg">+ Thêm mục tiêu</button></div>
+      <div class="toolbar"><h3 style="margin:0">Mục tiêu trọng yếu</h3><button class="primary" id="add-tg">+ Thêm mục tiêu</button></div>
       ${u.targets.length ? `
         <table>
           <tr><th>Kỳ</th><th>Chỉ tiêu</th><th class="num">Mục tiêu</th><th class="num">Thực hiện</th><th class="num">% đạt</th><th>Ghi chú</th><th></th></tr>
@@ -2990,7 +3674,10 @@ const UNIT_TABS = {
               <td><button class="link" data-edit="${t.id}">Sửa</button> · <button class="link danger" data-del="${t.id}">Xoá</button></td>
             </tr>`).join("")}
         </table>` : '<div class="empty">Chưa có mục tiêu. Bấm “Thêm mục tiêu” để nhập khi có số liệu.</div>'}`;
-    const form = (t) => openForm(t.id ? "Sửa mục tiêu" : "Thêm mục tiêu", [
+    const form = (t) => !t.id ? openForm("Thêm mục tiêu", [
+      ...periodFields(),
+      ...keyMetricFields(),
+    ], periodValues(), (raw) => saveKeyMetrics(raw, u.id, joinPeriod(raw))) : openForm("Sửa mục tiêu", [
       { name: "period", label: "Kỳ", required: true, placeholder: "2026, 2026-Q4 hoặc 2026-10" },
       { name: "metric", label: "Loại chỉ tiêu", type: "select", options: Object.entries(METRICS), default: "doanh_thu" },
       { name: "metric_name", label: "Tên chỉ tiêu (nếu là chỉ tiêu khác)" },
@@ -3011,12 +3698,29 @@ const UNIT_TABS = {
 
   async docs(body, u) {
     const [meta, units] = await Promise.all([api("/api/documents/meta"), api("/api/units")]);
+    const own = u.documents.filter((d) => d.is_owner), shared = u.documents.filter((d) => !d.is_owner);
+    const section = (title, hint, list) => `<section class="doc-section">
+      <div class="doc-section-head"><b>${title}</b><span class="badge">${list.length}</span><span class="muted">${hint}</span></div>
+      ${docTable(list, false)}</section>`;
     body.innerHTML = `
-      <div class="toolbar"><h3 style="margin:0">Tài liệu của đơn vị</h3>${can("docs_edit") ? DOC_ACTIONS : ""}</div>
-      ${u.documents.length ? docTable(u.documents, false) : '<div class="empty">Chưa có tài liệu. Tải lên quy trình ISO, hướng dẫn, biểu mẫu của đơn vị.</div>'}`;
+      <div class="toolbar"><div><h3 style="margin:0">Tài liệu của đơn vị</h3>
+        <div class="muted">${u.documents.length ? `${own.length} thuộc đơn vị · ${shared.length} dùng chung từ phòng ban khác` : "Chưa có tài liệu nào"}</div></div>
+        ${can("docs_edit") ? `<div><button class="ghost" id="pick-doc">${icon("plus")}Thêm tài liệu có sẵn</button>${DOC_ACTIONS}</div>` : ""}</div>
+      ${u.documents.length ? `
+        ${own.length ? section("Của đơn vị", "đơn vị này là chủ quản", own) : ""}
+        ${shared.length ? section("Dùng chung từ phòng ban khác", "chỉ gỡ khỏi đơn vị này, không xoá tài liệu gốc", shared) : ""}`
+        : '<div class="empty">Chưa có tài liệu. Tải lên quy trình ISO, hướng dẫn, biểu mẫu của đơn vị, hoặc thêm tài liệu đã có trong thư viện.</div>'}`;
     if (can("docs_edit")) {
       $("#up-doc").onclick = () => uploadForm(meta, units, u.id);
       $("#url-doc").onclick = () => urlLearnForm(units, u.id);
+      $("#pick-doc").onclick = () => linkExistingDocs(u);
+      body.querySelectorAll("[data-unlink-doc]").forEach((b) => (b.onclick = async () => {
+        const id = Number(b.dataset.unlinkDoc), d = await api(`/api/documents/${id}`);
+        try {
+          await api(`/api/documents/${id}`, { method: "PUT", body: { shared_unit_ids: d.shared_unit_ids.filter((x) => x !== u.id) } });
+          render();
+        } catch (e) { toast(e.message, "err"); }
+      }));
     }
     bindDocActions(body, meta, units);
     pollIfProcessing(u.documents);
@@ -3208,7 +3912,7 @@ const isUnreviewed = (d) => needsReview(d);  // PDF scan do AI đọc, chưa đ�
 
 // Khung chữ khi đối chiếu: sửa thẳng trên bản đã dựng (contenteditable); tab "Markdown" là ô mã gốc #rv-text, nguồn dữ liệu khi lưu.
 // Chỉ đổi HTML ngược về markdown khi người duyệt thật sự gõ (dirty), để bản chưa sửa giữ nguyên từng ký tự.
-const rvRender = (text) => window.marked ? marked.parse(esc(text).replace(/&gt;/g, ">")) : `<pre>${esc(text)}</pre>`;
+const rvRender = (text) => window.marked ? marked.parse(esc(text).replace(/&gt;/g, ">"), { breaks: true }).replace(/<li><\/li>/g, "<li><br></li>") : `<pre>${esc(text)}</pre>`;
 let rvTd;
 function rvToMd(html) {
   if (!rvTd) {
@@ -3228,10 +3932,92 @@ function rvSync(root) {
   if (view.dataset.dirty) { area.value = rvToMd(view.innerHTML); delete view.dataset.dirty; }
   return area.value;
 }
+// Như Word: Enter trên dòng trống, hoặc Backspace ở đầu dòng, của một mục danh sách thì lùi ra một cấp.
+// Một mục có thể chứa nhiều dòng (<br>) hoặc nhiều đoạn (<p>), nên xét theo dòng chứa con trỏ chứ không theo cả mục:
+// cấp ngoài cùng thì dòng đó và các dòng/đoạn sau nó thành đoạn thường (các mục phía sau tách thành danh sách mới), cấp con thì đưa lên cấp mục cha.
+function rvExitList(view, key) {
+  const sel = getSelection();
+  if (!sel.rangeCount || !sel.isCollapsed || !view.contains(sel.anchorNode)) return false;
+  const node = sel.anchorNode, off = sel.anchorOffset;
+  const li = (node.nodeType === 1 ? node : node.parentElement).closest("li");
+  if (!li || !view.contains(li) || li.querySelector("ul, ol")) return false;
+  const isBlock = (n) => !!n && n.nodeType === 1 && /^(P|DIV)$/.test(n.tagName);
+  const isBlank = (n) => !!n && n.nodeType === 3 && !n.textContent.trim();
+  const isBr = (n) => !!n && n.nodeName === "BR";
+  const nextReal = (n) => { for (n = n && n.nextSibling; isBlank(n); n = n.nextSibling); return n; };
+  // `at`: con trực tiếp của mục nằm ngay tại con trỏ (null = con trỏ ở cuối mục)
+  let at;
+  if (node === li) at = li.childNodes[off] || null;
+  else {
+    for (at = node; at.parentNode !== li; at = at.parentNode);
+    const r = document.createRange();
+    r.setStart(at, 0);
+    r.setEnd(node, off);
+    if (r.toString()) return false;  // con trỏ giữa chữ
+  }
+  let prev = at ? at.previousSibling : li.lastChild;
+  while (isBlank(prev)) prev = prev.previousSibling;
+  if (prev && !isBr(prev) && !isBlock(prev)) return false;  // không phải đầu dòng
+  if (key === "Enter") {
+    const emptyLine = !at || isBr(at) || (isBlock(at) && !at.textContent.trim() && !at.querySelector("img")) ||
+      (isBlank(at) && (!nextReal(at) || isBr(nextReal(at)) || isBlock(nextReal(at))));
+    if (!emptyLine) return false;
+  }
+  const list = li.parentElement, outer = list.parentElement.closest("li");
+  const kept = [];
+  for (let n = li.firstChild; n && n !== at; n = n.nextSibling) kept.push(n);
+  const hasKept = kept.some((n) => !isBlank(n) && !isBr(n));
+  const tail = [];
+  for (let n = li.nextElementSibling; n; n = n.nextElementSibling) tail.push(n);
+  if (outer && view.contains(outer)) {  // cấp con: đưa cả mục lên cấp của mục cha, các mục sau thành con của mục này
+    if (hasKept) return false;
+    if (tail.length) {
+      const rest = document.createElement(list.tagName);
+      tail.forEach((n) => rest.appendChild(n));
+      li.appendChild(rest);
+    }
+    outer.after(li);
+    if (!li.firstChild) li.innerHTML = "<br>";
+    if (!list.children.length) list.remove();
+    sel.collapse(li, 0);
+    return true;
+  }
+  const lifted = [];
+  for (let n = at; n; n = n.nextSibling) lifted.push(n);
+  // dòng trống đứng đầu: bỏ <br> kết thúc dòng đó nếu phía sau còn nội dung (dòng trống biến mất cùng dấu bullet)
+  if (isBr(lifted[0]) && lifted.slice(1).some((n) => !isBlank(n))) lifted.shift().remove();
+  const out = [];
+  let run = null;
+  for (const n of lifted) {
+    if (isBlock(n)) { run = null; out.push(n); }
+    else { if (!run) { run = document.createElement("p"); out.push(run); } run.appendChild(n); }
+  }
+  if (!out.length) out.push(document.createElement("p"));
+  out.forEach((p) => { if (!p.textContent.trim() && !p.querySelector("br, img")) p.innerHTML = "<br>"; });
+  let anchor = list;
+  out.forEach((n) => { anchor.after(n); anchor = n; });
+  if (tail.length) {
+    const rest = document.createElement(list.tagName);
+    tail.forEach((n) => rest.appendChild(n));
+    anchor.after(rest);
+  }
+  // phần còn lại của mục: bỏ <br> cuối (đã thành ranh giới đoạn); mục không còn gì thì xoá luôn
+  while (isBlank(li.lastChild)) li.lastChild.remove();
+  if (isBr(li.lastChild)) li.lastChild.remove();
+  while (isBlank(li.lastChild)) li.lastChild.remove();
+  if (!li.textContent.trim() && !li.querySelector("img")) li.remove();
+  if (!list.children.length) list.remove();
+  sel.collapse(out[0], 0);
+  return true;
+}
 function rvWireTabs(root) {
   const view = root.querySelector("#rv-view"), area = root.querySelector("#rv-text");
   view.addEventListener("input", () => { view.dataset.dirty = "1"; });
   view.addEventListener("paste", (e) => { e.preventDefault(); document.execCommand("insertText", false, e.clipboardData.getData("text/plain")); });
+  view.addEventListener("keydown", (e) => {
+    if ((e.key !== "Enter" && e.key !== "Backspace") || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return;
+    if (rvExitList(view, e.key)) { e.preventDefault(); e.stopImmediatePropagation(); view.dataset.dirty = "1"; }
+  });
   // Enter ở cuối dòng của mục cha (có danh sách con): thêm mục con đầu tiên ngay trong khối, thay vì để trình duyệt nhảy xuống mục cha kế tiếp
   view.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
@@ -3404,6 +4190,9 @@ function docTable(docs, showUnit, query = "") {
       const unread = DOC_UNREAD.has(d.extract_status);
       const meta = [
         showUnit ? (d.unit_id ? `<button class="link" onclick="go('units',{unitId:${d.unit_id}, unitTab:'docs'})">${esc(d.unit_name)}</button>` : "Chung") : "",
+        showUnit && (d.shared_units || []).length ? `cũng ở ${d.shared_units.map((x) => `<button class="link" onclick="go('units',{unitId:${x.id}, unitTab:'docs'})">${esc(x.name)}</button>`).join(", ")}` : "",
+        d.is_owner === false ? `<span class="badge">Từ ${esc(d.owner_unit_name || "Tài liệu chung")}</span>` : "",
+        d.is_owner && d.other_units ? `<span title="Cũng hiển thị ở các phòng ban này">Cũng ở ${esc(d.other_units)}</span>` : "",
         esc(DOC_LABELS[d.doc_type] || d.doc_type),
         d.page_count ? `${d.page_count} trang` : "",
         fmtSize(d.size_bytes),
@@ -3419,7 +4208,7 @@ function docTable(docs, showUnit, query = "") {
         <td class="doc-state">${stateCell(d)}</td>
         <td class="row-actions doc-acts">
           ${can("docs_download") ? `<a class="row-icon-btn" href="/api/documents/${d.id}/file" target="_blank" title="Tải về" aria-label="Tải về">${icon("download")}</a>` : ""}
-          ${can("docs_edit") || can("docs_delete") ? `<details class="doc-more doc-edit"><summary class="row-icon-btn" title="Thêm" aria-label="Thêm thao tác">⋯</summary><div>${can("docs_edit") ? `<button class="link" data-edit-doc="${d.id}">${icon("edit")}Sửa thông tin</button><button class="link" data-reproc="${d.id}">${icon("reset")}Đọc lại</button>` : ""}${can("docs_delete") ? `<button class="link danger" data-del-doc="${d.id}">${icon("trash")}Xoá</button>` : ""}</div></details>` : ""}</td>
+          ${can("docs_edit") || can("docs_delete") ? `<details class="doc-more doc-edit"><summary class="row-icon-btn" title="Thêm" aria-label="Thêm thao tác">⋯</summary><div>${can("docs_edit") ? `<button class="link" data-edit-doc="${d.id}">${icon("edit")}Sửa thông tin</button><button class="link" data-reproc="${d.id}">${icon("reset")}Đọc lại</button>${d.is_owner === false ? `<button class="link" data-unlink-doc="${d.id}">${icon("trash")}Gỡ khỏi đơn vị này</button>` : ""}` : ""}${can("docs_delete") ? `<button class="link danger" data-del-doc="${d.id}">${icon("trash")}Xoá</button>` : ""}</div></details>` : ""}</td>
       </tr>`;
     }).join("")}
   </table>`;
@@ -3430,6 +4219,45 @@ document.addEventListener("click", (e) => {
   document.querySelectorAll("details.doc-more[open]").forEach((m) => { if (!m.contains(e.target)) m.open = false; });
 });
 
+// Thêm tài liệu đã có trong thư viện vào đơn vị này (tài liệu hiện ở nhiều phòng ban, chỉ lưu một bản)
+async function linkExistingDocs(u) {
+  const all = (await api("/api/documents")).filter((d) => d.unit_id !== u.id && !(d.shared_units || []).some((x) => x.id === u.id));
+  const modal = $("#modal"), body = $("#modal-body"), ok = $("#modal-ok"), form = $("#modal-form");
+  const plain = (s) => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/g, "d").toLowerCase();
+  const picked = new Set();
+  $("#modal-title").textContent = `Thêm tài liệu vào ${u.name}`;
+  body.innerHTML = `<input type="search" id="lk-q" placeholder="Tìm theo tên hoặc mã tài liệu..." autocomplete="off">
+    <div id="lk-list" class="link-docs"></div><p class="muted" id="lk-sum"></p>`;
+  const draw = () => {
+    const q = plain($("#lk-q").value.trim());
+    const hits = all.filter((d) => !q || plain(`${d.code || ""} ${d.title}`).includes(q)).slice(0, 80);
+    $("#lk-list").innerHTML = hits.length ? hits.map((d) => `<label class="link-doc"><input type="checkbox" value="${d.id}" ${picked.has(d.id) ? "checked" : ""}>
+      <span><b>${esc((d.code ? d.code + " – " : "") + d.title)}</b><small>${esc(d.unit_name || "Tài liệu chung")} · ${esc(DOC_LABELS[d.doc_type] || d.doc_type)}</small></span></label>`).join("")
+      : '<div class="empty">Không có tài liệu nào để thêm.</div>';
+    $("#lk-sum").textContent = picked.size ? `Đã chọn ${picked.size} tài liệu` : "";
+    ok.disabled = !picked.size;
+  };
+  $("#lk-q").oninput = draw;
+  $("#lk-list").onchange = (e) => { const id = Number(e.target.value); e.target.checked ? picked.add(id) : picked.delete(id); draw(); };
+  ok.textContent = "Thêm vào đơn vị";
+  $("#modal-cancel").onclick = () => modal.close();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    ok.disabled = true;
+    try {
+      for (const id of picked) {
+        const d = await api(`/api/documents/${id}`);
+        await api(`/api/documents/${id}`, { method: "PUT", body: { shared_unit_ids: [...(d.shared_unit_ids || []), u.id] } });
+      }
+      modal.close();
+      render();
+    } catch (err) { toast("Không thêm được: " + err.message, "err"); ok.disabled = false; }
+  };
+  modal.addEventListener("close", () => { ok.textContent = "Lưu"; ok.disabled = false; }, { once: true });
+  draw();
+  modal.showModal();
+}
+
 function uploadForm(meta, units, unitId) {
   openForm("Tải tài liệu lên", [
     { name: "file", label: "File", type: "file", required: true, accept: meta.allowed_ext.join(",") },
@@ -3437,11 +4265,11 @@ function uploadForm(meta, units, unitId) {
     { name: "code", label: "Mã tài liệu", placeholder: "VD: QT-HCNS-01" },
     { name: "version", label: "Phiên bản / lần ban hành" },
     { name: "doc_type", label: "Loại", type: "select", options: Object.entries(meta.types), default: "quy_trinh" },
-    { name: "unit_id", label: "Đơn vị chủ quản", type: "select", options: [["", "— Tài liệu chung công ty —"], ...units.map((u) => [u.id, u.name])] },
+    { name: "unit_ids", label: "Phòng ban (chọn nhiều; ★ = đơn vị chủ quản)", type: "units", ordered: true, empty: "Tài liệu chung công ty (chưa chọn phòng ban)", placeholder: "Gõ tên phòng ban để thêm...", options: units.map((u) => [u.id, u.name]) },
     { name: "access_level", label: "Độ mật (ai được xem, kể cả qua trợ lý AI)", type: "select", options: meta.levels, default: meta.default_level },
-  ], { unit_id: unitId ?? "" }, (d) => {
+  ], { unit_ids: unitId ? [unitId] : [] }, ({ unit_ids, ...d }) => {
     const fd = new FormData();
-    Object.entries(d).forEach(([k, v]) => v !== "" && v != null && fd.append(k, v));
+    Object.entries({ ...d, unit_id: unit_ids[0] ?? "", shared_unit_ids: unit_ids.slice(1).join(",") }).forEach(([k, v]) => v !== "" && v != null && fd.append(k, v));
     return api("/api/documents", { method: "POST", body: fd });
   });
 }
@@ -3458,9 +4286,10 @@ function bindDocActions(el, meta, units) {
       { name: "code", label: "Mã tài liệu" },
       { name: "version", label: "Phiên bản" },
       { name: "doc_type", label: "Loại", type: "select", options: Object.entries(meta.types) },
-      { name: "unit_id", label: "Đơn vị chủ quản", type: "select", numeric: true, options: [["", "— Tài liệu chung —"], ...units.map((u) => [u.id, u.name])] },
+      { name: "unit_ids", label: "Phòng ban (chọn nhiều; ★ = đơn vị chủ quản)", type: "units", ordered: true, empty: "Tài liệu chung công ty (chưa chọn phòng ban)", placeholder: "Gõ tên phòng ban để thêm...", options: units.map((u) => [u.id, u.name]) },
       { name: "access_level", label: "Độ mật (ai được xem, kể cả qua trợ lý AI)", type: "select", options: d.access_level === "secret" && !meta.levels.some(([k]) => k === "secret") ? [["secret", "Mật (chỉ Ban TGĐ/Admin)"]] : meta.levels },
-    ], d, (data) => api(`/api/documents/${d.id}`, { method: "PUT", body: data }));
+    ], { ...d, unit_ids: [d.unit_id, ...(d.shared_unit_ids || [])].filter(Boolean) }, ({ unit_ids, ...data }) =>
+      api(`/api/documents/${d.id}`, { method: "PUT", body: { ...data, unit_id: unit_ids[0] ?? null, shared_unit_ids: unit_ids.slice(1) } }));
     if (d.uploaded_at) {  // thông tin chỉ đọc: ai đăng, lúc nào (không cần sửa)
       $("#modal-body").insertAdjacentHTML("afterbegin", `<p class="muted">Người đăng: ${d.uploader_name ? uploaderHtml(d) : "không rõ"} · tải lên ${esc(String(d.uploaded_at).slice(0, 16))}</p>`);
     }

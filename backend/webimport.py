@@ -158,15 +158,6 @@ def _summarize(title: str, text: str) -> str | None:
     snippet = text[:SUMMARY_INPUT_CHARS]
     user = f"Tiêu đề: {title}\n\n<noi_dung_trang_web>\n{snippet}\n</noi_dung_trang_web>"
     try:
-        if ai.PROVIDER == "groq":
-            import os
-            r = requests.post(ai.GROQ_URL, headers={"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"}, timeout=90,
-                              json={"model": ai.MODEL, "max_completion_tokens": 1500,
-                                    "messages": [{"role": "system", "content": SUMMARY_PROMPT},
-                                                 {"role": "user", "content": user}]})
-            if r.status_code != 200:
-                return None
-            return (r.json()["choices"][0]["message"].get("content") or "").strip() or None
         resp = ai.client(90).messages.create(
             model=ai.MODEL, max_tokens=1500, system=SUMMARY_PROMPT, output_config={"effort": "low"},
             messages=[{"role": "user", "content": user}])

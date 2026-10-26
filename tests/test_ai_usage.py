@@ -26,7 +26,7 @@ class UsageTest(unittest.TestCase):
         ai.record_usage(b, "claude-haiku-5-5", u)
         self.assertGreater(a["usage"]["cost_usd"], b["usage"]["cost_usd"])
 
-    def test_groq_not_priced(self):
+    def test_non_claude_not_priced(self):
         audit = ai.new_audit()
         ai.record_usage(audit, "openai/gpt-oss-120b", SimpleNamespace(input_tokens=10, output_tokens=10))
         self.assertEqual(audit["usage"]["cost_usd"], 0)

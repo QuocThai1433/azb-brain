@@ -109,7 +109,7 @@ EMPLOYEES = [
     ("cuongt", "Triệu Cường", "Triệu Cường", 1),
 ]
 
-# (unit_code, title, title_code, employee_key | None, is_head)
+# (unit_code, title, title_code, employee_key | None, is_head[, báo cáo cho: employee_key])
 POSITIONS = [
     ("HDQT", "Chủ tịch Hội đồng Quản trị", "CT", "tuan", 1),
     ("KSNB", "Trưởng ban", "TB", "nam", 1),
@@ -133,7 +133,10 @@ POSITIONS = [
     ("K-TCKT", "Giám đốc Khối", "GĐ", None, 1),
     ("P-KT", "Phó phòng", "PP", "nga", 1),
     ("B-TC", "Trưởng ban", "TB", "nam", 1),
-    ("B-QLCN", "Trưởng ban", "TB", None, 1),
+    ("B-QLCN", "Trưởng ban", "TB", "nam", 1),
+    # Chị Duy giải quyết trực tiếp công việc hai ban, báo cáo lại cho anh Nam (người quản lý)
+    ("B-TC", "Phụ trách điều hành", "PT", "duy", 0, "nam"),
+    ("B-QLCN", "Phụ trách điều hành", "PT", "duy", 0, "nam"),
 
     ("K-KTKT", "Giám đốc Khối", "GĐ", None, 1),
     ("P-TKKT", "Trưởng phòng", "TP", "viet", 1),
@@ -183,10 +186,13 @@ def seed() -> None:
             )
             emp_ids[key] = cur.lastrowid
 
-        for i, (ucode, title, tcode, ekey, is_head) in enumerate(POSITIONS):
+        for i, (ucode, title, tcode, ekey, is_head, *rest) in enumerate(POSITIONS):
+            reports_key = rest[0] if rest else None  # khoá nhân sự mà người giữ chức danh này báo cáo
             conn.execute(
-                "INSERT INTO positions (unit_id, title, title_code, employee_id, is_head, sort_order) VALUES (?,?,?,?,?,?)",
-                (unit_ids[ucode], title, tcode, emp_ids.get(ekey) if ekey else None, is_head, i),
+                "INSERT INTO positions (unit_id, title, title_code, employee_id, is_head, sort_order, reports_to_employee_id)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (unit_ids[ucode], title, tcode, emp_ids.get(ekey) if ekey else None, is_head, i,
+                 emp_ids.get(reports_key) if reports_key else None),
             )
 
         conn.execute(

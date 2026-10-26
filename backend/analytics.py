@@ -13,8 +13,10 @@ REVIEW_DAYS = 365  # quy trình/tài liệu nội bộ cần rà soát sau 12 th
 
 POSITION_SQL = """
 SELECT p.id, p.unit_id, p.title, p.title_code, p.is_head, p.headcount, p.notes,
-       p.employee_id, e.full_name AS employee_name, e.verified AS employee_verified
+       p.employee_id, e.full_name AS employee_name, e.verified AS employee_verified,
+       p.reports_to_employee_id, r.full_name AS reports_to_name
 FROM positions p LEFT JOIN employees e ON e.id = p.employee_id
+LEFT JOIN employees r ON r.id = p.reports_to_employee_id
 """
 
 
@@ -29,16 +31,23 @@ def units_flat(conn: sqlite3.Connection) -> list[dict]:
                       (SELECT COUNT(*) FROM processes WHERE unit_id = u.id) AS process_count,
                       (SELECT COUNT(*) FROM targets WHERE unit_id = u.id) AS target_count,
                       (SELECT COUNT(*) FROM positions WHERE unit_id = u.id) AS position_count,
-                      (SELECT COUNT(*) FROM documents WHERE unit_id = u.id AND doc_type IN """ + INTERNAL_DOC_TYPES + """)
+                      (SELECT COUNT(*) FROM documents d WHERE doc_type IN """ + INTERNAL_DOC_TYPES + """
+                          AND (d.unit_id = u.id OR d.id IN (SELECT doc_id FROM document_units WHERE unit_id = u.id)))
                           AS doc_count
                FROM units u""",
         )
     }
+    deputies = rows(conn, POSITION_SQL + " WHERE p.is_head = 0 ORDER BY p.sort_order")
     for u in units:
         h = next((h for h in heads if h["unit_id"] == u["id"]), None)
         u["head"] = (
             {"title_code": h["title_code"], "title": h["title"], "name": h["employee_name"] or "TBA"} if h else None
         )
+        # Các chức danh phó (PP...) hiển thị cùng ô trên sơ đồ, như sơ đồ gốc
+        u["deputies"] = [
+            {"title_code": d["title_code"], "name": d["employee_name"] or "TBA"}
+            for d in deputies if d["unit_id"] == u["id"]
+        ]
         u.update({k: v for k, v in counts.get(u["id"], {}).items() if k != "unit_id"})
     return units
 
@@ -62,6 +71,7 @@ def unit_detail(conn: sqlite3.Connection, unit_id: int) -> dict | None:
                          (unit_id,))
     u["positions"] = rows(conn, POSITION_SQL + " WHERE p.unit_id = ? ORDER BY p.is_head DESC, p.sort_order", (unit_id,))
     # Nhân sự thực tế theo danh sách HCNS (giống bảng "Nhân sự theo danh sách HCNS" trên giao diện)
+    u["reports_to"] = manager_lookup(conn)(unit_id)
     u["members"] = rows(conn, "SELECT id, employee_code, full_name, job_title, grade FROM employees"
                               " WHERE unit_id = ? AND status != 'inactive' ORDER BY sort_order = 0, sort_order, full_name",
                         (unit_id,))
@@ -70,8 +80,9 @@ def unit_detail(conn: sqlite3.Connection, unit_id: int) -> dict | None:
     u["head"] = {"title": head["title"], "name": head["employee_name"] or "TBA (chưa có người)"} if head else None
     u["processes"] = rows(conn, "SELECT * FROM processes WHERE unit_id = ? ORDER BY code, name", (unit_id,))
     # Tài liệu nội bộ của đơn vị (quy trình, quy định, RAM...) trong kho tài liệu
-    u["documents"] = rows(conn, "SELECT id AS doc_id, title, doc_type, version FROM documents WHERE unit_id = ?"
-                                " AND doc_type != 'website' ORDER BY title", (unit_id,))
+    u["documents"] = rows(conn, "SELECT id AS doc_id, title, doc_type, version FROM documents WHERE (unit_id = ? OR id IN"
+                                " (SELECT doc_id FROM document_units WHERE unit_id = ?))"
+                                " AND doc_type != 'website' ORDER BY title", (unit_id, unit_id))
     u["targets"] = rows(conn, "SELECT * FROM targets WHERE unit_id = ? ORDER BY period DESC, metric", (unit_id,))
     return u
 
@@ -87,13 +98,80 @@ def employee_roles(conn: sqlite3.Connection, can_see_contacts=lambda e: False) -
             e.pop("phone", None)
     roles = rows(
         conn,
-        """SELECT p.employee_id, p.title, p.title_code, p.is_head, u.id AS unit_id, u.name AS unit_name
+        """SELECT p.employee_id, p.title, p.title_code, p.is_head, u.id AS unit_id, u.name AS unit_name,
+                  r.full_name AS reports_to_name
            FROM positions p JOIN units u ON u.id = p.unit_id
+           LEFT JOIN employees r ON r.id = p.reports_to_employee_id
            WHERE p.employee_id IS NOT NULL ORDER BY p.sort_order""",
     )
     for e in emps:
         e["roles"] = [r for r in roles if r["employee_id"] == e["id"]]
     return emps
+
+
+def manager_lookup(conn: sqlite3.Connection):
+    """Trả về hàm unit_id -> "Chức danh Họ tên" của cấp quản lý trực tiếp: đi lên cây tổ chức đến đơn vị đầu tiên có
+    người đứng đầu (vd. P. QA/QC -> PTGĐ Thường trực; phòng thuộc khối chưa có Giám đốc -> người đứng đầu cấp trên của khối)."""
+    parents = {r["id"]: r["parent_id"] for r in rows(conn, "SELECT id, parent_id FROM units")}
+    head_of = {r["unit_id"]: f'{r["title"]} {r["name"]}' for r in rows(
+        conn, "SELECT p.unit_id, p.title, e.full_name AS name FROM positions p JOIN employees e ON e.id = p.employee_id"
+              " WHERE p.is_head = 1 ORDER BY p.sort_order DESC")}
+
+    def manager_of(unit_id):
+        up = parents.get(unit_id)
+        seen = set()
+        while up and up not in head_of and up not in seen:
+            seen.add(up)
+            up = parents.get(up)
+        return head_of.get(up)
+    return manager_of
+
+
+def direct_reports_of(conn: sqlite3.Connection, employee_id: int) -> list[dict]:
+    """Các đơn vị mà người này là cấp quản lý trực tiếp nhưng không phải người đứng đầu đơn vị đó
+    (vd. PTGĐ Thường trực -> P. QA/QC, P. HSSE, các phòng trong khối mình phụ trách), gom theo đơn vị mà người đó giữ chức."""
+    parents = {r["id"]: r["parent_id"] for r in rows(conn, "SELECT id, parent_id FROM units ORDER BY sort_order")}
+    names = {r["id"]: r["name"] for r in rows(conn, "SELECT id, name FROM units")}
+    head_emp = {}
+    for r in rows(conn, "SELECT unit_id, employee_id FROM positions WHERE is_head = 1 AND employee_id IS NOT NULL"
+                        " ORDER BY sort_order DESC"):
+        head_emp[r["unit_id"]] = r["employee_id"]
+    out: dict[int, list[int]] = {}
+    for uid in parents:
+        if head_emp.get(uid) == employee_id:
+            continue
+        up = parents[uid]
+        while up and up not in head_emp:
+            up = parents.get(up)
+        if up and head_emp[up] == employee_id:
+            out.setdefault(up, []).append(uid)
+    return [{"via": names[via], "via_id": via, "units": [names[u] for u in ids], "unit_ids": ids}
+            for via, ids in out.items()]
+
+
+HEAD_CODES = ("TP", "TB", "TBP")   # Trưởng phòng / ban / bộ phận
+DEPUTY_CODES = ("PP", "PB")        # Phó phòng / ban
+
+
+def leadership(conn: sqlite3.Connection) -> dict:
+    """Số lượng và danh sách trưởng, phó phòng/ban đang có người giữ (vị trí trống đã nằm ở mục TBA)."""
+    out = {}
+    for key, codes in (("heads", HEAD_CODES), ("deputies", DEPUTY_CODES)):
+        people = rows(
+            conn,
+            f"""SELECT e.id AS employee_id, e.full_name AS name, p.title, u.id AS unit_id, u.name AS unit_name
+                FROM positions p JOIN employees e ON e.id = p.employee_id JOIN units u ON u.id = p.unit_id
+                WHERE p.title_code IN ({','.join('?' * len(codes))}) ORDER BY u.sort_order, p.sort_order""",
+            codes,
+        )
+        out[key] = {"count": len(people), "people": people}
+    return out
+
+
+def head_label(conn: sqlite3.Connection, unit_id: int) -> str | None:
+    r = row(conn, "SELECT p.title, e.full_name AS name FROM positions p LEFT JOIN employees e ON e.id = p.employee_id"
+                  " WHERE p.unit_id = ? AND p.is_head = 1 ORDER BY p.sort_order LIMIT 1", (unit_id,))
+    return f'{r["title"]} {r["name"] or "(trống)"}' if r else None
 
 
 def insights(conn: sqlite3.Connection) -> dict:
@@ -103,11 +181,32 @@ def insights(conn: sqlite3.Connection) -> dict:
         """SELECT u.id AS unit_id, u.name AS unit_name, p.title, p.title_code
            FROM positions p JOIN units u ON u.id = p.unit_id WHERE p.employee_id IS NULL ORDER BY u.sort_order""",
     )
-    concurrent = [
-        {"employee_id": e["id"], "name": e["full_name"], "roles": [f'{r["title"]} – {r["unit_name"]}' for r in e["roles"]]}
-        for e in employee_roles(conn)
-        if len({r["unit_id"] for r in e["roles"]}) > 1
-    ]
+    # Giữ chức ở khối/phòng và ở đơn vị nằm trong nó (vd. Giám đốc Khối và Giám đốc phòng thuộc khối đó) là cùng một mạch
+    # quản lý, không phải kiêm nhiệm. Cấp điều hành (PTGĐ, Ban TGĐ) ở trên thì vẫn là một chức riêng nên không gộp.
+    parent_of = {r["id"]: r["parent_id"] for r in rows(conn, "SELECT id, parent_id FROM units")}
+    line_units = {r["id"] for r in rows(conn, "SELECT id FROM units WHERE unit_type IN ('division', 'department')")}
+
+    def has_held_ancestor(unit_id, held):
+        up, seen = parent_of.get(unit_id), set()
+        while up and up not in seen:
+            if up in held and up in line_units:
+                return True
+            seen.add(up)
+            up = parent_of.get(up)
+        return False
+
+    concurrent = []
+    for e in employee_roles(conn):
+        held = {r["unit_id"] for r in e["roles"]}
+        distinct = {u for u in held if not has_held_ancestor(u, held)}
+        if len(distinct) > 1:
+            concurrent.append({"employee_id": e["id"], "name": e["full_name"],
+                               "roles": [f'{r["title"]} – {r["unit_name"]}'
+                                         + (f' (báo cáo {r["reports_to_name"]})' if r["reports_to_name"] else "")
+                                         for r in e["roles"]],
+                               "role_items": [{"title": r["title"], "unit_id": r["unit_id"], "unit_name": r["unit_name"],
+                                               "reports_to": r["reports_to_name"]} for r in e["roles"]],
+                               "manages": direct_reports_of(conn, e["id"])})
     # Đơn vị cấp phòng/ban mà người phụ trách chỉ là cấp phó (chưa có trưởng)
     deputy_led = rows(
         conn,
@@ -116,26 +215,40 @@ def insights(conn: sqlite3.Connection) -> dict:
            LEFT JOIN employees e ON e.id = p.employee_id
            WHERE u.unit_type = 'department' AND p.title_code IN ('PP', 'PB') ORDER BY u.sort_order""",
     )
+    manager_of = manager_lookup(conn)
+    for d in deputy_led:
+        d["reports_to"] = manager_of(d["unit_id"])
+    for v in vacancies:  # vị trí đầu đơn vị còn trống thì cấp trên trực tiếp đang quản lý thay
+        v["reports_to"] = manager_of(v["unit_id"])
     span = rows(
         conn,
         """SELECT u.id AS unit_id, u.name AS unit_name, COUNT(c.id) AS direct_reports
            FROM units u JOIN units c ON c.parent_id = u.id
            GROUP BY u.id HAVING COUNT(c.id) > 0 ORDER BY direct_reports DESC""",
     )
+    for x in span:
+        x["head"] = head_label(conn, x["unit_id"])
+        x["reports_to"] = manager_of(x["unit_id"])
     missing_process = rows(  # chưa có quy trình có cấu trúc VÀ chưa có tài liệu quy trình/quy định nào trong kho
         conn,
         """SELECT id AS unit_id, name AS unit_name FROM units
            WHERE unit_type IN ('department','committee')
              AND id NOT IN (SELECT unit_id FROM processes WHERE unit_id IS NOT NULL)
              AND id NOT IN (SELECT unit_id FROM documents WHERE unit_id IS NOT NULL AND doc_type IN """ + INTERNAL_DOC_TYPES + """)
+             AND id NOT IN (SELECT du.unit_id FROM document_units du JOIN documents dd ON dd.id = du.doc_id
+                            WHERE dd.doc_type IN """ + INTERNAL_DOC_TYPES + """)
            ORDER BY sort_order""",
     )
+    for x in missing_process:
+        x["reports_to"] = manager_of(x["unit_id"])
     missing_target = rows(
         conn,
         """SELECT id AS unit_id, name AS unit_name FROM units
            WHERE unit_type IN ('division','department') AND id NOT IN (SELECT unit_id FROM targets WHERE unit_id IS NOT NULL)
            ORDER BY sort_order""",
     )
+    for x in missing_target:
+        x["reports_to"] = manager_of(x["unit_id"])
     unverified = {
         "units": rows(conn, "SELECT id, name, full_name, notes FROM units WHERE verified = 0 ORDER BY sort_order"),
         "employees": rows(conn, "SELECT id, full_name FROM employees WHERE verified = 0 ORDER BY full_name"),
@@ -168,6 +281,7 @@ def insights(conn: sqlite3.Connection) -> dict:
     )
     for s in staffing:
         s["open_on_chart"] = max(0, s["planned"] - s["seated"])
+        s["reports_to"] = manager_of(s["unit_id"])
         s["gap"] = s["hcns_active"] - s["planned"]  # âm = thiếu so với định biên, dương = dư
     draft_processes = rows(
         conn,
@@ -189,6 +303,7 @@ def insights(conn: sqlite3.Connection) -> dict:
         "vacancies": vacancies,
         "concurrent_roles": concurrent,
         "deputy_led_departments": deputy_led,
+        "leadership": leadership(conn),
         "span_of_control": span,
         "units_without_process": missing_process,
         "units_without_target": missing_target,

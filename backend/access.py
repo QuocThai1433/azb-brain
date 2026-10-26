@@ -52,9 +52,31 @@ def doc_scope(conn: sqlite3.Connection, user: dict, alias: str = "d") -> tuple[s
     params: list = [user["id"]]
     units = unit_tree(conn, user.get("unit_id"))
     if units:
-        clause += f" OR ({alias}.access_level = 'restricted' AND {alias}.unit_id IN ({','.join('?' * len(units))}))"
-        params += sorted(units)
+        marks = ','.join('?' * len(units))
+        clause += (f" OR ({alias}.access_level = 'restricted' AND ({alias}.unit_id IN ({marks}) OR EXISTS"
+                   f" (SELECT 1 FROM document_units du WHERE du.doc_id = {alias}.id AND du.unit_id IN ({marks}))))")
+        params += sorted(units) * 2
     return clause + ")", params
+
+
+def in_unit_sql(alias: str = "d") -> str:
+    """Mệnh đề 'tài liệu thuộc đơn vị ?': đơn vị chủ quản hoặc đơn vị dùng chung. Mỗi lần dùng cần đúng 2 tham số (cùng unit_id)."""
+    return (f"({alias}.unit_id = ? OR EXISTS (SELECT 1 FROM document_units du"
+            f" WHERE du.doc_id = {alias}.id AND du.unit_id = ?))")
+
+
+def shared_unit_ids(conn: sqlite3.Connection, doc_id: int) -> list[int]:
+    return [r[0] for r in conn.execute("SELECT unit_id FROM document_units WHERE doc_id = ? ORDER BY unit_id", (doc_id,))]
+
+
+def set_shared_units(conn: sqlite3.Connection, doc_id: int, unit_ids, primary: int | None) -> list[int]:
+    """Ghi lại danh sách đơn vị dùng chung (bỏ trùng, bỏ đơn vị chủ quản, bỏ id không tồn tại)."""
+    ids = sorted({int(x) for x in (unit_ids or []) if str(x).isdigit() and int(x) != (primary or 0)})
+    if ids:
+        ids = [r[0] for r in conn.execute(f"SELECT id FROM units WHERE id IN ({','.join('?' * len(ids))})", ids)]
+    conn.execute("DELETE FROM document_units WHERE doc_id = ?", (doc_id,))
+    conn.executemany("INSERT INTO document_units (doc_id, unit_id) VALUES (?, ?)", [(doc_id, i) for i in ids])
+    return sorted(ids)
 
 
 def visible_doc_ids(conn: sqlite3.Connection, user: dict, include_private: bool = True) -> set[int]:

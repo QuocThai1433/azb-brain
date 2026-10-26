@@ -1,6 +1,6 @@
 """Thông tin liên hệ nhân sự trong trợ lý AI.
 
-Nguyên tắc: SĐT và email KHÔNG bao giờ đi tới nhà cung cấp AI (Gemini/Groq) và KHÔNG nằm trong văn bản do AI viết.
+Nguyên tắc: SĐT và email KHÔNG bao giờ đi tới nhà cung cấp AI (Anthropic/Gemini), kể cả khi nằm trong nội dung tài liệu (xem scrub_obj) và KHÔNG nằm trong văn bản do AI viết.
 - AI chỉ chọn người bằng dấu [[LH:<id>]] (id = mã bản ghi nhân viên), đặt ngay sau họ tên đầy đủ.
 - Máy chủ tra số từ bảng nhân sự theo đúng id đó, và chỉ điền vào khi hiển thị cho người có quyền.
 - Dấu chỉ được chấp nhận khi họ tên của đúng nhân viên đó xuất hiện ngay trước dấu; nếu không thì không điền số (fail closed).
@@ -28,6 +28,18 @@ def scrub(text: str) -> str:
     """Che mọi SĐT/email trong văn bản (dùng cho câu hỏi người dùng, lịch sử và câu trả lời AI viết)."""
     text = EMAIL.sub(HIDDEN, text or "")
     return PHONE.sub(HIDDEN, text)
+
+
+def scrub_obj(obj):
+    """Che SĐT/email trong mọi chuỗi của kết quả công cụ (dict/list lồng nhau): nội dung tài liệu có thể chứa số liên hệ
+    và không được gửi cho nhà cung cấp AI."""
+    if isinstance(obj, str):
+        return scrub(obj)
+    if isinstance(obj, list):
+        return [scrub_obj(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: scrub_obj(v) for k, v in obj.items()}
+    return obj
 
 
 def marker_ids(text: str) -> set[int]:

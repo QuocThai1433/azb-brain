@@ -91,7 +91,8 @@ class DataPathTest(unittest.TestCase):
             CREATE TABLE employees (id INTEGER PRIMARY KEY, full_name TEXT, email TEXT, phone TEXT,
                                     unit_id INTEGER, sort_order INTEGER DEFAULT 0, status TEXT DEFAULT 'active');
             CREATE TABLE positions (id INTEGER PRIMARY KEY, unit_id INTEGER, title TEXT, title_code TEXT,
-                                    employee_id INTEGER, is_head INTEGER DEFAULT 0, sort_order INTEGER DEFAULT 0);
+                                    employee_id INTEGER, is_head INTEGER DEFAULT 0, sort_order INTEGER DEFAULT 0,
+                                    reports_to_employee_id INTEGER);
             INSERT INTO units (id, name) VALUES (1, 'Phòng Công nghệ thông tin');
             INSERT INTO employees (id, full_name, email, phone, unit_id)
                 VALUES (1, 'Nguyễn Văn An', 'an.nv@azb.com.vn', '0912345678', 1);
