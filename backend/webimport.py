@@ -167,11 +167,11 @@ def _summarize(title: str, text: str) -> str | None:
             if r.status_code != 200:
                 return None
             return (r.json()["choices"][0]["message"].get("content") or "").strip() or None
-        from google.genai import types
-        resp = ai.client(90).models.generate_content(
-            model=ai.MODEL, contents=user, config=types.GenerateContentConfig(system_instruction=SUMMARY_PROMPT,
-                                                                              max_output_tokens=1500))
-        return (resp.text or "").strip() or None
+        resp = ai.client(90).messages.create(
+            model=ai.MODEL, max_tokens=1500, system=SUMMARY_PROMPT, output_config={"effort": "low"},
+            messages=[{"role": "user", "content": user}])
+        ai.log_usage("web_summary", ai.MODEL, getattr(resp, "usage", None), "tóm tắt trang web")
+        return ai.message_text(resp) or None
     except Exception:
         return None
 

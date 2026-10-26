@@ -1,6 +1,7 @@
 """Trả lời AI theo luồng: /api/chat/stream báo từng công cụ AI gọi rồi gửi kết quả cuối giống /api/chat."""
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,7 +15,7 @@ def _events(text: str) -> list[dict]:
     return [json.loads(line[5:]) for line in text.split("\n\n") if line.startswith("data:")]
 
 
-def _fake_answer(history, user, audit=None, memory=""):
+def _fake_answer(history, user, audit=None, memory="", model=None):
     audit["progress"] and audit["progress"]("search")
     audit["progress"] and audit["progress"]("get_unit_detail")
     return {"answer": "Đây là câu trả lời", "tools_used": ["search", "get_unit_detail"]}
@@ -49,6 +50,17 @@ class ChatStreamTest(unittest.TestCase):
         self.assertIn("conversation_id", done)
         self.assertTrue(done["title"])
 
+    def test_streams_text_preview_before_done(self):
+        def answer(history, user, audit=None, memory="", model=None):
+            audit["on_text"]("Đang viết")
+            return {"answer": "Đang viết xong", "tools_used": []}
+        with mock.patch.object(ai, "answer", side_effect=answer):
+            r = self.client.post("/api/chat/stream", json={"content": "Hỏi"})
+        events = _events(r.text)
+        self.assertEqual([e["type"] for e in events], ["text", "done"])
+        self.assertEqual(events[0]["text"], "Đang viết")
+        self.assertEqual(events[-1]["answer"], "Đang viết xong")
+
     def test_saves_conversation_like_plain_chat(self):
         with mock.patch.object(ai, "answer", side_effect=_fake_answer):
             self.client.post("/api/chat/stream", json={"content": "Hỏi thử"})
@@ -64,6 +76,22 @@ class ChatStreamTest(unittest.TestCase):
         events = _events(r.text)
         self.assertEqual(events[-1]["type"], "error")
         self.assertNotIn("hỏng", events[-1]["detail"])  # không lộ lỗi nội bộ cho người dùng
+
+    def test_sends_ping_while_ai_is_silent(self):
+        def slow(history, user, audit=None, memory="", model=None):
+            time.sleep(0.35)
+            return {"answer": "Xong", "tools_used": []}
+        with mock.patch.object(app_module, "STREAM_PING_SECONDS", 0.1), mock.patch.object(ai, "answer", side_effect=slow):
+            r = self.client.post("/api/chat/stream", json={"content": "Hỏi lâu"})
+        self.assertIn(": ping\n\n", r.text)  # giữ kết nối khi AI im lặng
+        self.assertEqual([e["type"] for e in _events(r.text)], ["done"])  # dòng ping không lẫn vào sự kiện
+
+    def test_saved_answer_readable_from_conversation_api(self):
+        # frontend lấy lại câu trả lời qua API đoạn chat khi luồng bị ngắt (rời app)
+        with mock.patch.object(ai, "answer", side_effect=_fake_answer):
+            self.client.post("/api/chat/stream", json={"content": "Hỏi thử"})
+        msgs = self.client.get("/api/conversations/1").json()["messages"]
+        self.assertEqual([m["role"] for m in msgs], ["user", "assistant"])
 
     def test_requires_login(self):
         anon = TestClient(app_module.app)

@@ -3,6 +3,7 @@
 Chạy từ thư mục gốc dự án: python -m unittest tests.test_security
 """
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -65,6 +66,12 @@ class DbCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)  # Windows còn giữ file db mở
         self.patch = mock.patch.object(db, "DB_PATH", Path(self.tmp.name) / "azb.db")
         self.patch.start()
+        # test không được gọi API thật (khoá trong .env sẽ làm luồng nền đọc ảnh/scan gọi ra ngoài và tốn phí)
+        self.env = mock.patch.dict("os.environ")
+        self.env.start()
+        for key in ("ANTHROPIC_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+            os.environ.pop(key, None)
+        self.addCleanup(self.env.stop)
         db.init_db()
         with db.connect() as c:
             c.execute("INSERT INTO units (id, code, name, unit_type) VALUES (1,'HQ','Công ty','board')")

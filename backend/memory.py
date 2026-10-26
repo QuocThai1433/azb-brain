@@ -7,6 +7,7 @@
 - Không ghi: lương/thu nhập, sức khoẻ, tôn giáo, chính trị, giấy tờ/tài khoản/mật khẩu, SĐT/email, nội dung tài liệu công ty.
 - Người dùng xem/sửa/xoá từng ghi chú và xoá toàn bộ ở trang "AI nhớ gì về tôi"; admin/ceo xem được để quản lý (có nhật ký).
 """
+import functools
 import json
 import re
 import sqlite3
@@ -155,7 +156,7 @@ def _transcript(msgs: list[dict], limit: int = 6000) -> str:
 def extract_conversation(conv_id: int, complete=None) -> bool:
     """Trích ghi chú từ phần mới của một đoạn chat. True = xong (kể cả không có gì để ghi); False = chưa làm được (AI lỗi), sẽ thử lại."""
     from . import ai
-    complete = complete or ai.complete
+    complete = complete or functools.partial(ai.complete, light_first=True)  # trích vài câu ngắn: Haiku đủ, rẻ hơn Sonnet ~3 lần
     with connect() as conn:
         conv = row(conn, "SELECT c.id, c.user_id, c.memory_at, c.updated_at, u.memory_on FROM conversations c"
                          " JOIN users u ON u.id = c.user_id WHERE c.id = ?", (conv_id,))

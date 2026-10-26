@@ -2,7 +2,7 @@
 
 Hai lớp kiểm tra:
   1. Miễn phí (luôn chạy): thiếu trang, trang trống dù có nhiều mực, [không rõ], ký tự lỗi, mất dấu tiếng Việt.
-  2. Đọc lại độc lập (tốn phí Gemini, chỉ khi có --sample): mỗi tài liệu lấy N trang ngẫu nhiên, cho AI đọc lại từ ảnh trang,
+  2. Đọc lại độc lập (tốn phí Anthropic, chỉ khi có --sample): mỗi tài liệu lấy N trang ngẫu nhiên, cho AI đọc lại từ ảnh trang,
      rồi so từ và con số với văn bản đã lưu. Lệch nhiều → nghi ngờ.
 
 Chạy (từ thư mục gốc dự án):
@@ -18,6 +18,8 @@ import re
 import time
 import unicodedata
 from pathlib import Path
+
+import anthropic
 
 from .db import DB_PATH, connect, rows
 from .documents import split_pages
@@ -76,25 +78,29 @@ def free_checks(doc, pdf, pages: dict[int, str]) -> dict[int, list[str]]:
 
 
 def reread_page(pdf, page_no: int) -> str:
-    """Lớp 2: cho Gemini đọc lại đúng một trang từ ảnh, độc lập với lần đọc cũ."""
-    import pymupdf
-    from google.genai import errors, types
+    """Lớp 2: cho Claude đọc lại đúng một trang từ ảnh, độc lập với lần đọc cũ."""
+    import base64
 
-    from .ai import GEMINI_MODEL, client
+    import pymupdf
+
+    from .ai import ANTHROPIC_MODEL, client, log_usage, message_text
 
     png = pdf[page_no - 1].get_pixmap(matrix=pymupdf.Matrix(2, 2)).tobytes("png")
     prompt = ("Chép lại nguyên văn toàn bộ chữ trong ảnh trang tài liệu này (tiếng Việt, giữ đúng dấu và mọi con số). "
               "Bảng thì dùng bảng Markdown. Không tóm tắt, không bình luận.")
-    gemini = client(timeout_s=300)
+    claude = client(timeout_s=300)
+    data = base64.standard_b64encode(png).decode("ascii")
     for attempt in range(3):
         try:
-            msg = gemini.models.generate_content(
-                model=GEMINI_MODEL, contents=[types.Part.from_bytes(data=png, mime_type="image/png"), prompt],
-                config=types.GenerateContentConfig(max_output_tokens=16000,
-                                                   thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)))
-            return msg.text or ""
-        except errors.ServerError:
-            if attempt == 2:
+            msg = claude.messages.create(
+                model=ANTHROPIC_MODEL, max_tokens=16000, output_config={"effort": "low"},
+                messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}},
+                    {"type": "text", "text": prompt}]}])
+            log_usage("verify_scan", ANTHROPIC_MODEL, getattr(msg, "usage", None), f"trang {page_no}")
+            return message_text(msg)
+        except anthropic.APIStatusError as e:
+            if e.status_code < 500 or attempt == 2:
                 raise
             time.sleep(10 * (attempt + 1))
     return ""
@@ -132,9 +138,9 @@ def main() -> None:
         want = {int(x) for x in a.docs.split(",")}
         docs = [d for d in docs if d["id"] in want]
     if a.sample:
-        from .ai import has_gemini
-        if not has_gemini():
-            raise SystemExit("Chưa có GEMINI_API_KEY – bỏ --sample để chỉ chạy lớp 1.")
+        from .ai import has_anthropic
+        if not has_anthropic():
+            raise SystemExit("Chưa có ANTHROPIC_API_KEY – bỏ --sample để chỉ chạy lớp 1.")
 
     out, summary = [], []
     quota_hit = False

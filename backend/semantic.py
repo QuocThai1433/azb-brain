@@ -37,7 +37,7 @@ def _embed(texts: list[str], task: str) -> list[list[float]]:
         return _embed_override(texts, task)
     from google.genai import types
     from . import ai
-    resp = ai.client(60).models.embed_content(
+    resp = ai.gemini_client(60).models.embed_content(
         model=MODEL, contents=texts,
         config=types.EmbedContentConfig(task_type=task, output_dimensionality=DIM))
     return [_normalize(list(e.values)) for e in resp.embeddings]

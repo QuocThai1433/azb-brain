@@ -1,8 +1,10 @@
 """Kho tài liệu: lưu file gốc, trích xuất văn bản, chia đoạn và đánh chỉ mục tìm kiếm.
 
-Hỗ trợ: PDF (có lớp chữ), PDF scan (đọc bằng Gemini), DOCX, XLSX/XLS, TXT/MD, âm thanh (gỡ băng bằng Gemini).
+Hỗ trợ: PDF (có lớp chữ), PDF scan (đọc bằng Claude), DOCX, XLSX/XLS, TXT/MD, âm thanh (gỡ băng bằng Gemini).
 """
+import hashlib
 import math
+import os
 import re
 import sqlite3
 import unicodedata
@@ -227,15 +229,16 @@ def render_html(path: Path, title: str, fallback_text: str | None = None) -> str
 
 
 def _ocr_pdf_with_ai(path: Path) -> tuple[list[str], str]:
-    """Đọc PDF scan bằng Gemini theo từng cụm trang. Trả về (danh sách văn bản theo cụm, ghi chú)."""
+    """Đọc PDF scan bằng Claude theo từng cụm trang. Trả về (danh sách văn bản theo cụm, ghi chú)."""
+    import base64
+
     import pymupdf
-    from google.genai import types
 
-    from .ai import GEMINI_MODEL, client, has_gemini
+    from .ai import ANTHROPIC_MODEL, client, has_anthropic, log_usage, message_text
 
-    if not has_gemini():
-        raise RuntimeError("PDF dạng scan – cần khoá Gemini API để đọc chữ (OCR).")
-    gemini = client(timeout_s=600)
+    if not has_anthropic():
+        raise RuntimeError("PDF dạng scan – cần khoá Anthropic API để đọc chữ (OCR).")
+    claude = client(timeout_s=600)
     prompt = (
         "Chép lại nguyên văn toàn bộ nội dung tài liệu này sang Markdown (tiếng Việt, giữ đúng dấu). "
         "Giữ cấu trúc tiêu đề, danh sách, bảng (dạng bảng Markdown), mã tài liệu, số hiệu phiên bản. "
@@ -249,25 +252,21 @@ def _ocr_pdf_with_ai(path: Path) -> tuple[list[str], str]:
             end = min(start + OCR_PAGES_PER_CALL, total) - 1
             part = pymupdf.open()
             part.insert_pdf(src, from_page=start, to_page=end)
-            data = part.tobytes()
+            data = base64.standard_b64encode(part.tobytes()).decode("ascii")
             part.close()
-            msg = gemini.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=[
-                    types.Part.from_bytes(data=data, mime_type="application/pdf"),
-                    prompt + f" Cụm này bắt đầu từ trang {start + 1}.",
-                ],
-                config=types.GenerateContentConfig(
-                    max_output_tokens=64000,
-                    thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW),
-                ),
-            )
-            reason = msg.candidates[0].finish_reason.name if msg.candidates and msg.candidates[0].finish_reason else ""
-            if (msg.prompt_feedback and msg.prompt_feedback.block_reason) or reason in ("SAFETY", "PROHIBITED_CONTENT"):
+            with claude.messages.stream(
+                model=ANTHROPIC_MODEL, max_tokens=64000, output_config={"effort": "low"},
+                messages=[{"role": "user", "content": [
+                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}},
+                    {"type": "text", "text": prompt + f" Cụm này bắt đầu từ trang {start + 1}."}]}],
+            ) as stream:
+                msg = stream.get_final_message()
+            log_usage("ocr_pdf", ANTHROPIC_MODEL, getattr(msg, "usage", None), f"{path.name} (trang {start + 1}-{end + 1})")
+            if msg.stop_reason == "refusal":
                 raise RuntimeError(f"Mô hình từ chối đọc trang {start + 1}-{end + 1}.")
-            if reason == "MAX_TOKENS":
+            if msg.stop_reason == "max_tokens":
                 notes.append(f"Trang {start + 1}-{end + 1} có thể bị thiếu nội dung cuối.")
-            out.append(msg.text or "")
+            out.append(message_text(msg))
     return out, " ".join(notes)
 
 
@@ -277,11 +276,12 @@ def _transcribe_audio(path: Path) -> tuple[str, str]:
 
     from google.genai import errors, types
 
-    from .ai import GEMINI_MODEL, client, has_gemini
+    from .ai import gemini_client, has_gemini
 
+    GEMINI_MODEL = os.environ.get("AZB_GEMINI_MODEL", "gemini-3.8-flash")  # Anthropic chưa nhận âm thanh nên gỡ băng vẫn dùng Gemini
     if not has_gemini():
-        raise RuntimeError("File âm thanh – cần khoá Gemini API để gỡ băng.")
-    gemini = client(timeout_s=900)
+        raise RuntimeError("File âm thanh – cần khoá Gemini API (GEMINI_API_KEY) để gỡ băng.")
+    gemini = gemini_client(timeout_s=900)
     prompt = (
         "Gỡ băng nguyên văn file ghi âm này (chủ yếu tiếng Việt, giữ đúng dấu; từ tiếng Anh giữ nguyên). "
         "Mỗi đoạn bắt đầu bằng mốc thời gian [mm:ss]. Nếu nhận ra nhiều người nói thì ghi 'Người 1:', 'Người 2:'... "
@@ -324,45 +324,35 @@ def _transcribe_audio(path: Path) -> tuple[str, str]:
     return msg.text or "", note
 
 
-IMAGE_INLINE_MAX = 18 * 1024 * 1024  # Gemini giới hạn ~20 MB cho cả yêu cầu khi gửi ảnh trực tiếp
+IMAGE_INLINE_MAX = 5 * 1024 * 1024  # Claude nhận ảnh tối đa 5 MB mỗi ảnh
 
 
 def _read_image(path: Path) -> str:
-    """Đọc ảnh (ảnh chụp màn hình, biểu đồ, giấy tờ, bảng) bằng Gemini: chép chữ + mô tả những gì thấy."""
-    import time
+    """Đọc ảnh (ảnh chụp màn hình, biểu đồ, giấy tờ, bảng) bằng Claude: chép chữ + mô tả những gì thấy."""
+    import base64
 
-    from google.genai import errors, types
+    from .ai import ANTHROPIC_MODEL, client, has_anthropic, log_usage, message_text
 
-    from .ai import GEMINI_MODEL, client, has_gemini
-
-    if not has_gemini():
-        raise RuntimeError("File ảnh – cần khoá Gemini API để đọc nội dung ảnh.")
+    if not has_anthropic():
+        raise RuntimeError("File ảnh – cần khoá Anthropic API để đọc nội dung ảnh.")
     if path.stat().st_size > IMAGE_INLINE_MAX:
-        raise RuntimeError("Ảnh quá lớn (trên 18 MB) – hãy giảm kích thước rồi tải lại.")
+        raise RuntimeError("Ảnh quá lớn (trên 5 MB) – hãy giảm kích thước rồi tải lại.")
     prompt = (
         "Đọc bức ảnh này cho một trợ lý doanh nghiệp (tiếng Việt). (1) Chép lại nguyên văn mọi chữ nhìn thấy, giữ đúng dấu, "
         "bảng thì dựng lại dạng bảng Markdown, giữ nguyên số liệu. (2) Sau đó mô tả ngắn gọn phần không phải chữ "
         "(biểu đồ, sơ đồ, hình, giao diện phần mềm) và nêu số liệu/ý chính thấy được. Chữ mờ không đọc được ghi [không rõ]. "
         "Chỉ nêu những gì có trong ảnh, không suy đoán thêm."
     )
-    gemini = client(timeout_s=300)
-    part = types.Part.from_bytes(data=path.read_bytes(), mime_type=IMAGE_MIME[path.suffix.lower()])
-    for attempt in range(3):  # model hay báo 503 "quá tải" tạm thời
-        try:
-            msg = gemini.models.generate_content(
-                model=GEMINI_MODEL, contents=[part, prompt],
-                config=types.GenerateContentConfig(
-                    max_output_tokens=16000,
-                    thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)))
-            break
-        except errors.ServerError:
-            if attempt == 2:
-                raise
-            time.sleep(10 * (attempt + 1))
-    reason = msg.candidates[0].finish_reason.name if msg.candidates and msg.candidates[0].finish_reason else ""
-    if (msg.prompt_feedback and msg.prompt_feedback.block_reason) or reason in ("SAFETY", "PROHIBITED_CONTENT"):
+    data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
+    msg = client(timeout_s=300).messages.create(
+        model=ANTHROPIC_MODEL, max_tokens=16000, output_config={"effort": "low"},
+        messages=[{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": IMAGE_MIME[path.suffix.lower()], "data": data}},
+            {"type": "text", "text": prompt}]}])
+    log_usage("ocr_image", ANTHROPIC_MODEL, getattr(msg, "usage", None), path.name)
+    if msg.stop_reason == "refusal":
         raise RuntimeError("Mô hình từ chối đọc ảnh này.")
-    return msg.text or ""
+    return message_text(msg)
 
 
 def extract(path: Path, use_ocr: bool = True) -> dict:
@@ -423,14 +413,55 @@ def chunk(pages: list[tuple[int | None, str]]) -> list[tuple[int | None, str]]:
 
 
 def _friendly_error(e: Exception) -> str:
-    """Lỗi API thô của Google (dài, tiếng Anh, có JSON) → câu ngắn dễ hiểu; giữ mã 429/503 để retry_ocr nhận ra."""
-    code = getattr(e, "code", None)
+    """Lỗi API thô (dài, tiếng Anh, có JSON) → câu ngắn dễ hiểu; giữ mã 429/503 để retry_ocr nhận ra."""
+    code = getattr(e, "code", None) or getattr(e, "status_code", None)
     if code == 429 or "RESOURCE_EXHAUSTED" in str(e):
-        return "Gemini đang hết hạn mức đọc ảnh/scan (429). Tài liệu chưa đọc được, hãy thử lại sau ít phút."
-    if code in (500, 502, 503, 504):
-        return f"Gemini đang quá tải ({code}). Hãy thử lại sau ít phút."
+        return "AI đang hết hạn mức đọc ảnh/scan (429). Tài liệu chưa đọc được, hãy thử lại sau ít phút."
+    if code in (500, 502, 503, 504, 529):
+        return f"AI đang quá tải ({code}). Hãy thử lại sau ít phút."
     text = str(e)
     return text if len(text) <= 200 else text[:200] + "…"
+
+
+def _file_hash(path: Path) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _reuse_twin(doc_id: int, doc: dict, digest: str) -> bool:
+    """File này đã được đọc xong ở một tài liệu khác (cùng nội dung từng byte) thì chép kết quả sang, khỏi gọi AI lần nữa.
+    Người tải đang giữ chính file đó nên không có thông tin nào lộ ra. True = đã dùng lại."""
+    with connect() as conn:
+        twin = None
+        # tài liệu cũ chưa có hash: chỉ băm những file cùng dung lượng (ít) rồi lưu lại cho lần sau
+        for c in rows(conn, "SELECT id, stored_path, content_hash FROM documents WHERE id != ? AND size_bytes = ?"
+                            " AND extract_status = 'ok' AND content IS NOT NULL AND content != '' ORDER BY id",
+                      (doc_id, doc["size_bytes"])):
+            h = c["content_hash"]
+            if not h and c["stored_path"]:
+                h = _file_hash(Path(c["stored_path"]))
+                if h:
+                    conn.execute("UPDATE documents SET content_hash = ? WHERE id = ?", (h, c["id"]))
+            if h == digest:
+                twin = c
+                break
+        if not twin:
+            return False
+        src = row(conn, "SELECT content, page_count, char_count, extract_note FROM documents WHERE id = ?", (twin["id"],))
+        conn.execute("DELETE FROM doc_page_review WHERE doc_id = ?", (doc_id,))
+        conn.execute("DELETE FROM doc_chunks WHERE doc_id = ?", (doc_id,))
+        conn.execute("INSERT INTO doc_chunks (text, doc_id, chunk_no, page) SELECT text, ?, chunk_no, page FROM doc_chunks WHERE doc_id = ?",
+                     (doc_id, twin["id"]))
+        note = ((src["extract_note"] or "") + " (Dùng lại kết quả đã đọc của file trùng, không gọi AI lần nữa.)").strip()
+        conn.execute("UPDATE documents SET extract_status = 'ok', extract_note = ?, content = ?, page_count = ?, char_count = ?"
+                     " WHERE id = ?", (note, src["content"], src["page_count"], src["char_count"], doc_id))
+    return True
 
 
 def process_document(doc_id: int, use_ocr: bool = True) -> None:
@@ -440,12 +471,24 @@ def process_document(doc_id: int, use_ocr: bool = True) -> None:
         if not doc:
             return
         conn.execute("UPDATE documents SET extract_status = 'processing', extract_note = NULL WHERE id = ?", (doc_id,))
+    path = Path(doc["stored_path"])
+    digest = _file_hash(path) if doc["stored_path"] else None
+    if digest:
+        with connect() as conn:
+            conn.execute("UPDATE documents SET content_hash = ? WHERE id = ?", (digest, doc_id))
+        # đọc lại một file đã 'ok' là người dùng chủ ý đọc lại (bản đọc cũ chưa ưng): không dùng lại bản của file trùng
+        if doc["extract_status"] != "ok" and _reuse_twin(doc_id, doc, digest):
+            return
+    from .ai import usage_user  # tiền OCR/gỡ băng tính cho chủ file (hoặc người tải lên) để áp trần chi tiêu cá nhân
+    token = usage_user.set(doc.get("owner_id") or doc.get("uploaded_by"))
     try:
-        result = extract(Path(doc["stored_path"]), use_ocr=use_ocr)
+        result = extract(path, use_ocr=use_ocr)
     except Exception as e:
         with connect() as conn:
             conn.execute("UPDATE documents SET extract_status = 'failed', extract_note = ? WHERE id = ?", (_friendly_error(e), doc_id))
         return
+    finally:
+        usage_user.reset(token)
     content = "\n\n".join(p for _, p in result["pages"])
     suspicious = guard.scan(content)
     if suspicious:  # giống chỉ dẫn ép AI: AI vẫn đọc được nhưng phần đó bị vô hiệu hoá; báo người quản lý kiểm tra file

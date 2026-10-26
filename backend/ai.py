@@ -1,8 +1,9 @@
-"""Trợ lý AI cho Tổng Giám đốc: Groq hoặc Gemini + công cụ đọc dữ liệu công ty (chỉ đọc).
+"""Trợ lý AI cho Tổng Giám đốc: Anthropic (Claude) hoặc Groq + công cụ đọc dữ liệu công ty (chỉ đọc).
 
 AI không "học thuộc" dữ liệu bằng fine-tune; mỗi câu hỏi nó tra cứu trực tiếp database qua các tool bên dưới,
 nên dữ liệu vừa cập nhật là dùng được ngay và câu trả lời luôn dẫn được nguồn.
 """
+import contextvars
 import json
 import os
 import re
@@ -11,14 +12,13 @@ import time
 
 from pathlib import Path
 
+import anthropic
 import httpx
-from google import genai
-from google.genai import errors, types
 
-from . import access, analytics, auth, documents, export, guard, selfinfo
+from . import access, analytics, auth, contacts, documents, export, guard, selfinfo
 from .db import connect, row, rows
 
-# Cho phép đặt khoá trong file .env ở thư mục gốc dự án (GEMINI_API_KEY=...)
+# Cho phép đặt khoá trong file .env ở thư mục gốc dự án (ANTHROPIC_API_KEY=...)
 _ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
@@ -26,21 +26,124 @@ if _ENV_FILE.exists():
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip().strip('"'))
 
-GEMINI_MODEL = os.environ.get("AZB_GEMINI_MODEL", "gemini-3.8-flash")
+ANTHROPIC_MODEL = os.environ.get("AZB_ANTHROPIC_MODEL", "claude-sonnet-5-5")
+ANTHROPIC_EFFORT = os.environ.get("AZB_ANTHROPIC_EFFORT", "low")
 GROQ_MODEL = os.environ.get("AZB_GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# Nhà cung cấp AI cho trợ lý: AI_PROVIDER=groq|gemini; bỏ trống thì có GROQ_API_KEY là dùng Groq, không thì Gemini.
-# Đọc PDF scan (OCR) luôn dùng Gemini vì Groq không nhận file PDF.
-PROVIDER = (os.environ.get("AI_PROVIDER") or ("groq" if os.environ.get("GROQ_API_KEY") else "gemini")).strip().lower()
-MODEL = os.environ.get("AZB_MODEL") or (GROQ_MODEL if PROVIDER == "groq" else GEMINI_MODEL)
-MAX_TOOL_ROUNDS = 20
+# Nhà cung cấp AI cho trợ lý: AI_PROVIDER=anthropic|groq; bỏ trống thì có ANTHROPIC_API_KEY là dùng Anthropic, không thì Groq.
+# Đọc ảnh/PDF scan (OCR) luôn dùng Anthropic vì Groq không nhận file PDF.
+PROVIDER = (os.environ.get("AI_PROVIDER") or ("groq" if os.environ.get("GROQ_API_KEY") and not os.environ.get("ANTHROPIC_API_KEY")
+                                              else "anthropic")).strip().lower()
+if PROVIDER != "groq":  # giá trị cũ AI_PROVIDER=gemini (hoặc gõ sai) → dùng Anthropic
+    PROVIDER = "anthropic"
+# Chat mặc định dùng model rẻ (Haiku). Câu cần suy luận thì giao diện hỏi người dùng có nâng lên SMART_MODEL / DEEP_MODEL
+# không (xem upgrade_offer); server không tự đổi model của người dùng.
+# ANTHROPIC_MODEL (đắt hơn) chỉ còn cho việc cần chính xác như đọc scan (OCR).
+CHAT_MODEL = os.environ.get("AZB_CHAT_MODEL", "claude-haiku-5-5")
+SMART_MODEL = os.environ.get("AZB_SMART_MODEL", "claude-sonnet-5-5")
+MODEL = os.environ.get("AZB_MODEL") or (GROQ_MODEL if PROVIDER == "groq" else CHAT_MODEL)
+# Các model Claude cho người dùng chọn trong khung chat (chỉ nhận id trong danh sách này)
+CLAUDE_MODELS = [
+    {"id": "claude-haiku-5-5", "label": "Haiku 5.5", "hint": "Mặc định, nhanh và rẻ; câu cần suy luận sẽ hỏi bạn có nâng lên không"},
+    {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5", "hint": "Cân bằng tốc độ và chất lượng"},
+    {"id": "claude-opus-5-5", "label": "Opus 5.5", "hint": "Mạnh nhất, phân tích sâu, đắt nhất"},
+]
+MAX_TOOL_ROUNDS = int(os.environ.get("AZB_MAX_TOOL_ROUNDS", "4"))
+LIGHT_TOOL_ROUNDS = int(os.environ.get("AZB_LIGHT_TOOL_ROUNDS", "3"))  # số vòng tra cứu tối đa của model nhẹ (Haiku)
+SMART_QUESTION_CHARS = 300
+# Từ khoá viết không dấu (câu hỏi được bỏ dấu trước khi so). Ba bậc:
+#   0 tra cứu dữ liệu có sẵn → Haiku; 1 cần suy luận → đề nghị nâng lên Sonnet;
+#   2 suy luận cao → đề nghị Sonnet hoặc Opus (Opus đắt hơn Sonnet khoảng 1,7 lần). Người dùng quyết định.
+_REASON_WORDS = ("phan tich", "danh gia", "so sanh", "doi chieu", "chenh lech", "mau thuan", "bat cap", "bat hop ly",
+                 "tac dong", "anh huong", "hieu qua", "nguyen nhan", "tai sao", "vi sao", "de xuat", "khuyen nghi",
+                 "kien nghi", "giai phap", "cai tien", "toi uu", "ke hoach", "du bao", "xu huong", "nhan xet", "tong hop",
+                 "tom tat toan", "viet bao cao", "soan", "lap bang")
+_DEEP_WORDS = ("rui ro", "chien luoc", "kiem nhiem", "trach nhiem", "tai co cau", "bo may", "phan bo nhan su")
+DEEP_MODEL = "claude-opus-5-5"
+DEEP_QUESTION_CHARS = 600
+
+
+def question_tier(question: str) -> int:
+    """0 tra cứu, 1 cần suy luận, 2 suy luận cao (đánh giá rủi ro/chiến lược/cơ cấu, hoặc nhiều yêu cầu phân tích trong một câu)."""
+    q = question or ""
+    folded = documents._fold(q)
+    reason = sum(1 for w in _REASON_WORDS if w in folded)
+    deep = any(w in folded for w in _DEEP_WORDS)
+    if deep and reason or reason >= 3 or len(q) > DEEP_QUESTION_CHARS:
+        return 2
+    return 1 if deep or reason or len(q) > SMART_QUESTION_CHARS else 0
+
+
+def upgrade_offer(question: str) -> dict | None:
+    """Đề nghị nâng model cho câu hỏi cần suy luận (None = cứ dùng Haiku). Chỉ so từ khoá, không gọi AI nên không tốn tiền."""
+    tier = question_tier(question)
+    if not tier:
+        return None
+    sonnet = {"id": SMART_MODEL, "label": "Dùng Sonnet", "hint": "trả lời tốt hơn, tốn gấp khoảng 3 lần Haiku"}
+    if tier == 1:
+        return {"tier": 1, "message": "Câu này cần suy luận. Dùng Sonnet để trả lời tốt hơn?", "options": [sonnet]}
+    opus = {"id": DEEP_MODEL, "label": "Dùng Opus", "hint": "phân tích sâu nhất, đắt nhất"}
+    return {"tier": 2, "message": "Câu này cần suy luận cao. Bạn muốn dùng model nào?", "options": [opus, sonnet]}
+
+
+# Giá ước tính USD / 1 triệu token (input, output) theo họ model; chỉnh bằng AZB_PRICE_<OPUS|SONNET|HAIKU>=in,out
+# nếu bảng giá Anthropic thay đổi. Cache đọc tính 0.1x, ghi cache 1.25x giá input.
+_PRICES = {"opus": (5.0, 25.0), "sonnet": (3.0, 15.0), "haiku": (1.0, 5.0)}
+
+
+def _price(model: str) -> tuple[float, float]:
+    for fam, default in _PRICES.items():
+        if fam in model.lower():
+            raw = os.environ.get(f"AZB_PRICE_{fam.upper()}", "")
+            try:
+                p_in, p_out = (float(x) for x in raw.split(","))
+                return p_in, p_out
+            except ValueError:
+                return default
+    return (0.0, 0.0)  # model không phải Claude (Groq): không tính
+
+
+usage_user: contextvars.ContextVar[int | None] = contextvars.ContextVar("usage_user", default=None)  # người gây ra lần gọi nền
+
+
+def log_usage(kind: str, model: str, usage, label: str = "") -> None:
+    """Ghi một lần gọi AI ngoài khung chat vào ai_usage_log (kèm người gây ra nếu có, xem `usage_user`).
+    Lỗi ghi log không được làm hỏng việc đang làm."""
+    try:
+        tmp: dict = {}
+        record_usage(tmp, model, usage)
+        u = tmp.get("usage")
+        if not u:
+            return
+        with connect() as conn:
+            conn.execute("INSERT INTO ai_usage_log (kind, label, model, input_tokens, output_tokens, cost_usd, user_id) VALUES (?,?,?,?,?,?,?)",
+                         (kind, (label or "")[:200], model, u["input"] + u["cache_read"] + u["cache_write"], u["output"], u["cost_usd"],
+                          usage_user.get()))
+    except Exception:
+        pass
+
+
+def record_usage(audit: dict, model: str, usage) -> None:
+    """Cộng dồn token của một lần gọi API vào `audit["usage"]` để ghi nhật ký (mọi vòng tra cứu đều tính tiền)."""
+    if usage is None:
+        return
+    inp, out = usage.input_tokens or 0, usage.output_tokens or 0
+    c_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    c_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    p_in, p_out = _price(model)
+    cost = (inp * p_in + c_read * p_in * 0.1 + c_write * p_in * 1.25 + out * p_out) / 1_000_000
+    u = audit.setdefault("usage", {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cost_usd": 0.0})
+    u["input"] += inp
+    u["output"] += out
+    u["cache_read"] += c_read
+    u["cache_write"] += c_write
+    u["cost_usd"] += cost
 MAX_EXPORTS_PER_ANSWER = 3
 
 # Hạn mức tính THEO TỪNG MODEL: hết hạn mức model này thì thử model kế tiếp (rồi sang hãng còn lại).
-GEMINI_FALLBACKS = [m.strip() for m in os.environ.get(
-    "AZB_GEMINI_FALLBACKS", "gemini-3.6-flash,gemini-3.5-flash,gemini-3-flash-preview,gemini-3.1-flash-lite,gemini-3.5-flash-lite"
-).split(",") if m.strip()]
+ANTHROPIC_FALLBACKS = [m.strip() for m in os.environ.get(
+    "AZB_ANTHROPIC_FALLBACKS", "claude-sonnet-5-5,claude-haiku-5-5").split(",") if m.strip()]
 GROQ_FALLBACKS = [m.strip() for m in os.environ.get(
     "AZB_GROQ_FALLBACKS", "openai/gpt-oss-20b,qwen/qwen3.8-27b").split(",") if m.strip()]
 
@@ -355,7 +458,8 @@ def _dispatch(conn, name: str, args: dict, user: dict, audit: dict, char_budget:
     if name == "list_employees":
         # Không đưa email/SĐT cho nhà cung cấp AI: liên hệ được điền ở máy chủ, xem backend/contacts.py.
         # Chỉ chuyển các trường trong EMPLOYEE_AI_FIELDS (ngày sinh, hợp đồng, ghi chú... ở lại máy chủ).
-        return [{k: e.get(k) for k in guard.EMPLOYEE_AI_FIELDS} for e in analytics.employee_roles(conn)]
+        # bỏ trường rỗng cho gọn token (thiếu trường = không có giá trị)
+        return [{k: e[k] for k in guard.EMPLOYEE_AI_FIELDS if e.get(k) not in (None, "")} for e in analytics.employee_roles(conn)]
     if name == "get_org_insights":
         return {**analytics.insights(conn), "note": (
             "units_without_process tính theo tài liệu quy trình/quy định/RAM đã tải lên. units_without_target chỉ xét "
@@ -393,47 +497,61 @@ def _dispatch(conn, name: str, args: dict, user: dict, audit: dict, char_budget:
     return {"error": f"Công cụ không tồn tại: {name}"}
 
 
-_KEY_NAME = "GROQ_API_KEY" if PROVIDER == "groq" else "GEMINI_API_KEY"
+_KEY_NAME = "GROQ_API_KEY" if PROVIDER == "groq" else "ANTHROPIC_API_KEY"
 NOT_CONFIGURED = {"answer": f"Chưa cấu hình khoá {PROVIDER.capitalize()} API. Thêm {_KEY_NAME} vào file .env ở thư mục dự án "
                             "(hoặc biến môi trường) rồi khởi động lại server.", "tools_used": [], "error": "not_configured"}
 
 
+def has_anthropic() -> bool:
+    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
 def has_gemini() -> bool:
+    """Khoá Gemini chỉ còn dùng cho gỡ băng âm thanh và vector tìm theo ý nghĩa (Anthropic chưa có hai tính năng này)."""
     return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
 
 
 def has_credentials() -> bool:
-    return bool(os.environ.get("GROQ_API_KEY")) if PROVIDER == "groq" else has_gemini()
+    return bool(os.environ.get("GROQ_API_KEY")) if PROVIDER == "groq" else has_anthropic()
 
 
 def status() -> dict:
-    return {"configured": has_credentials(), "model": MODEL, "provider": PROVIDER, "key_name": _KEY_NAME}
+    return {"configured": has_credentials(), "model": MODEL, "provider": PROVIDER, "key_name": _KEY_NAME,
+            "models": CLAUDE_MODELS if PROVIDER == "anthropic" else [],
+            "default_model": MODEL}
 
 
-def client(timeout_s: int = 45) -> genai.Client:
-    """Client Gemini – tự đọc khoá từ GEMINI_API_KEY / GOOGLE_API_KEY."""
+def client(timeout_s: int = 45) -> anthropic.Anthropic:
+    """Client Anthropic – tự đọc khoá từ ANTHROPIC_API_KEY. SDK tự thử lại lỗi tạm thời một lần."""
+    return anthropic.Anthropic(timeout=timeout_s, max_retries=1)
+
+
+def gemini_client(timeout_s: int = 45):
+    """Client Gemini, chỉ cho gỡ băng âm thanh và embedding (tuỳ chọn, cần GEMINI_API_KEY)."""
+    from google import genai
+    from google.genai import types
     return genai.Client(http_options=types.HttpOptions(timeout=timeout_s * 1000))
 
 
-def _finish_reason(response) -> str:
-    cand = response.candidates[0] if response.candidates else None
-    return cand.finish_reason.name if cand and cand.finish_reason else ""
+def message_text(msg) -> str:
+    """Gộp các khối văn bản trong câu trả lời của Claude (bỏ khối suy nghĩ)."""
+    return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 
 def _has_key(provider: str) -> bool:
-    return bool(os.environ.get("GROQ_API_KEY")) if provider == "groq" else has_gemini()
+    return bool(os.environ.get("GROQ_API_KEY")) if provider == "groq" else has_anthropic()
 
 
 def _model_chain(provider: str) -> list[str]:
     """Model chính của nhà cung cấp (theo cấu hình) rồi đến các model dự phòng, bỏ trùng."""
-    first = MODEL if provider == PROVIDER else (GROQ_MODEL if provider == "groq" else GEMINI_MODEL)
-    extra = GROQ_FALLBACKS if provider == "groq" else GEMINI_FALLBACKS
+    first = MODEL if provider == PROVIDER else (GROQ_MODEL if provider == "groq" else CHAT_MODEL)
+    extra = GROQ_FALLBACKS if provider == "groq" else ANTHROPIC_FALLBACKS
     return list(dict.fromkeys([first, *extra]))
 
 
 def _is_weak(model: str) -> bool:
     """Model loại nhẹ: tuân thủ hướng dẫn và suy luận kém hơn, chỉ dùng khi mọi model mạnh đều hết hạn mức."""
-    return bool(re.search(r"lite|(?<!\d)(?:8|20|27)b\b", model.lower()))  # "120b" là model mạnh, không phải "20b"
+    return bool(re.search(r"haiku|(?<!\d)(?:8|20|27)b\b", model.lower()))  # "120b" là model mạnh, không phải "20b"
 
 
 # Ghi chú hệ thống gắn vào câu trả lời; bị bỏ khi gửi lại lịch sử cho AI để AI không bắt chước.
@@ -442,7 +560,17 @@ TRUNCATED_NOTE = "\n\n_(Câu trả lời bị cắt do quá dài.)_"
 # mô hình kết thúc mà không có chữ nào: báo lỗi (không lưu) thay vì lưu một câu trả lời rỗng
 EMPTY_ANSWER = "Trợ lý chưa đưa ra được câu trả lời cho câu này. Hãy gửi lại câu hỏi."
 _SYSTEM_NOTES = re.compile(r"\n*_\(Lưu ý: mô hình AI chính đang hết hạn mức[^\n]*\)_\s*$|\n*_\(Câu trả lời bị cắt do quá dài\.\)_")
-MAX_HISTORY_MESSAGES = int(os.environ.get("AZB_MAX_HISTORY_MESSAGES", "12"))
+MAX_HISTORY_MESSAGES = int(os.environ.get("AZB_MAX_HISTORY_MESSAGES", "8"))
+# Câu trả lời cũ của AI (trừ 2 lượt gần nhất) chỉ giữ phần đầu: prompt đã dặn tra cứu lại thay vì tin kết luận cũ
+OLD_ANSWER_CHARS = int(os.environ.get("AZB_OLD_ANSWER_CHARS", "1200"))
+RECENT_ANSWERS_FULL = 2
+
+
+def _clip_old(text: str) -> str:
+    if len(text) <= OLD_ANSWER_CHARS:
+        return text
+    cut = text[:OLD_ANSWER_CHARS]
+    return (cut.rsplit(None, 1)[0] if len(cut.split()) > 1 else cut).rstrip() + " …"
 
 
 def _prepare_history(history: list[dict]) -> tuple[list[dict], str]:
@@ -453,10 +581,14 @@ def _prepare_history(history: list[dict]) -> tuple[list[dict], str]:
     while prev and prev[0]["role"] != "user":  # bắt đầu bằng câu hỏi, không bằng câu trả lời bị cắt đôi
         prev = prev[1:]
     out, unchecked = [], 0
+    answers_left = sum(1 for m in prev if m["role"] == "assistant")
     for m in prev:
         content = m["content"]
         if m["role"] == "assistant":
             content = _SYSTEM_NOTES.sub("", content).strip()
+            if answers_left > RECENT_ANSWERS_FULL:
+                content = _clip_old(content)
+            answers_left -= 1
             if m.get("tools_used") in ("[]", "", None) and "tools_used" in m:
                 unchecked += 1
         out.append({"role": m["role"], "content": content})
@@ -467,9 +599,28 @@ def _prepare_history(history: list[dict]) -> tuple[list[dict], str]:
     return out + current, note
 
 
-def new_audit(progress=None) -> dict:
-    """`progress(tên_công_cụ)` (tuỳ chọn) được gọi mỗi khi AI bắt đầu tra cứu; dùng để báo tiến trình khi trả lời theo luồng."""
-    return {"flags": [], "docs_read": set(), "exports": [], "progress": progress}
+def new_audit(progress=None, on_text=None) -> dict:
+    """`progress(tên_công_cụ)` (tuỳ chọn) được gọi mỗi khi AI bắt đầu tra cứu; dùng để báo tiến trình khi trả lời theo luồng.
+    `on_text(văn_bản)` (tuỳ chọn) nhận bản xem trước của câu trả lời đang viết (đã lọc, rỗng = xoá bản cũ)."""
+    return {"flags": [], "docs_read": set(), "exports": [], "progress": progress, "on_text": on_text, "text_at": 0.0}
+
+
+TEXT_PREVIEW_INTERVAL_S = 0.15
+_ANY_MARKER = re.compile(r"\[\[(?:LH:\d+|TT)\]\]")
+
+
+def _preview_text(audit: dict, text: str, force: bool = False) -> None:
+    """Gửi bản xem trước câu trả lời đang viết. Lọc như câu trả lời cuối (bỏ ảnh/link, che SĐT/email) và bỏ các dấu
+    [[LH:..]]/[[TT]] (chỉ điền được khi lưu xong, theo quyền người xem); câu trả lời cuối vẫn là bản thay thế bản này."""
+    cb = audit.get("on_text")
+    now = time.monotonic()
+    if not cb or (not force and now - audit["text_at"] < TEXT_PREVIEW_INTERVAL_S):
+        return
+    audit["text_at"] = now
+    try:
+        cb(_ANY_MARKER.sub("", guard.clean_answer(contacts.scrub(text))))
+    except Exception:  # xem trước lỗi không được làm hỏng câu trả lời
+        pass
 
 
 def _progress(audit: dict, name: str) -> None:
@@ -481,10 +632,11 @@ def _progress(audit: dict, name: str) -> None:
             pass
 
 
-def answer(history: list[dict], user: dict, audit: dict | None = None, memory: str = "") -> dict:
+def answer(history: list[dict], user: dict, audit: dict | None = None, memory: str = "", model: str | None = None) -> dict:
     """Trả lời một câu hỏi cho `user`: mọi công cụ chỉ trả dữ liệu trong phạm vi quyền của user này.
     `audit` (tuỳ chọn) được điền các cờ cảnh báo và id tài liệu đã đọc để máy chủ ghi nhật ký.
-    `memory`: ghi chú cá nhân của user (chỉ khi user bật bộ nhớ), xem backend/memory.py."""
+    `memory`: ghi chú cá nhân của user (chỉ khi user bật bộ nhớ), xem backend/memory.py.
+    `model`: model Claude người dùng chọn (phải nằm trong CLAUDE_MODELS); được thử trước, hết hạn mức mới sang model khác."""
     if not has_credentials():
         return NOT_CONFIGURED
     audit = audit if audit is not None else new_audit()
@@ -492,10 +644,15 @@ def answer(history: list[dict], user: dict, audit: dict | None = None, memory: s
     who = (f"Người đang hỏi: {user.get('full_name') or user['username']} (vai trò: {auth.ROLES.get(user['role'], user['role'])}). "
            + selfinfo.identity_note(user.get("employee_id")))
     system = _system_prompt(" ".join(x for x in (note, who, memory) if x))
-    other = "gemini" if PROVIDER == "groq" else "groq"
+    other = "anthropic" if PROVIDER == "groq" else "groq"
     chain = [(p, m) for p in (PROVIDER, other) if _has_key(p) for m in _model_chain(p)]
     # hết hạn mức → thử lần lượt các model mạnh (của cả hai nhà cung cấp) trước, model nhẹ để sau cùng
     chain = [c for c in chain if not _is_weak(c[1])] + [c for c in chain if _is_weak(c[1])]
+    chosen = {m["id"] for m in CLAUDE_MODELS}
+    if model not in chosen and PROVIDER == "anthropic":  # không chọn / id lạ → model mặc định (rẻ); nâng model do người dùng quyết
+        model = CHAT_MODEL
+    if model in chosen and has_anthropic():
+        chain = [("anthropic", model)] + [c for c in chain if c != ("anthropic", model)]
     now = time.monotonic()
     ready = [c for c in chain if _cooldown.get(c, 0) <= now]  # model vừa báo hết hạn mức thì bỏ qua một lúc, đỡ mất thời gian
     chain = ready or chain
@@ -516,11 +673,14 @@ def answer(history: list[dict], user: dict, audit: dict | None = None, memory: s
     return _finish(first, audit) if first else NOT_CONFIGURED
 
 
-def complete(system: str, prompt: str, max_tokens: int = 1500) -> str | None:
+def complete(system: str, prompt: str, max_tokens: int = 1500, light_first: bool = False) -> str | None:
     """Gọi mô hình một lượt, không công cụ (việc nền như trích ghi chú). Thử lần lượt các mô hình mạnh của hai nhà cung
-    cấp; None nếu tất cả đều lỗi/hết hạn mức (người gọi tự thử lại lần sau)."""
-    other = "gemini" if PROVIDER == "groq" else "groq"
+    cấp; None nếu tất cả đều lỗi/hết hạn mức (người gọi tự thử lại lần sau).
+    light_first: việc đơn giản (trích vài câu ngắn) thử model rẻ (Haiku) trước, lỗi mới sang model mạnh."""
+    other = "anthropic" if PROVIDER == "groq" else "groq"
     chain = [(p, m) for p in (PROVIDER, other) if _has_key(p) for m in _model_chain(p) if not _is_weak(m)]
+    if light_first and has_anthropic():
+        chain = [("anthropic", CHAT_MODEL)] + [c for c in chain if c != ("anthropic", CHAT_MODEL)]
     now = time.monotonic()
     chain = ([c for c in chain if _cooldown.get(c, 0) <= now] or chain)[:4]
     for provider, model in chain:
@@ -535,12 +695,12 @@ def complete(system: str, prompt: str, max_tokens: int = 1500) -> str | None:
                     continue
                 text = resp.json()["choices"][0]["message"].get("content")
             else:
-                msg = client(60).models.generate_content(
-                    model=model, contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system, max_output_tokens=max(max_tokens, 4000),
-                        thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)))
-                text = msg.text
+                msg = client(60).messages.create(
+                    model=model, system=system, max_tokens=max(max_tokens, 4000),
+                    output_config={"effort": "low"},
+                    messages=[{"role": "user", "content": prompt}])
+                text = message_text(msg)
+                log_usage("memory", model, getattr(msg, "usage", None), "trích ghi chú / việc nền")
         except Exception:
             _cooldown[(provider, model)] = time.monotonic() + MODEL_COOLDOWN_S
             continue
@@ -556,110 +716,119 @@ def _finish(result: dict, audit: dict) -> dict:
         if audit["flags"] and not result.get("error"):
             result["answer"] += ("\n\n_(Cảnh báo bảo mật: có tài liệu chứa nội dung giống chỉ dẫn ép AI làm sai. Phần đó đã bị "
                                  "vô hiệu hoá và không ảnh hưởng câu trả lời; nên nhờ quản trị viên kiểm tra tài liệu.)_")
-    result["audit"] = {"flags": audit["flags"], "docs_read": sorted(audit["docs_read"]), "exports": audit["exports"]}
+    result["audit"] = {"flags": audit["flags"], "docs_read": sorted(audit["docs_read"]), "exports": audit["exports"],
+                       "usage": audit.get("usage")}
     return result
 
 
 def _answer_with(provider: str, history: list[dict], model: str, system: str, user: dict, audit: dict) -> dict:
-    fn = _answer_groq if provider == "groq" else _answer_gemini
+    fn = _answer_groq if provider == "groq" else _answer_anthropic
     return fn(history, model, system, user, audit)
 
 
-GEMINI_RETRY_CODES = (500, 502, 503, 504)
-GEMINI_RETRIES = 1  # thử lại nhiều hơn làm chậm việc chuyển sang model dự phòng
 ANSWER_BUDGET_S = int(os.environ.get("AZB_ANSWER_BUDGET_S", "120"))
 MODEL_COOLDOWN_S = 60
 _cooldown: dict[tuple[str, str], float] = {}
 
 
-def _gemini_generate(gemini, contents, config, model):
-    """Gọi Gemini, tự thử lại (chờ tăng dần) khi máy chủ quá tải/lỗi tạm thời."""
-    for attempt in range(GEMINI_RETRIES + 1):
-        try:
-            return gemini.models.generate_content(model=model, contents=contents, config=config)
-        except errors.APIError as e:
-            if e.code not in GEMINI_RETRY_CODES or attempt == GEMINI_RETRIES:
-                raise
-            time.sleep(2 * 2 ** attempt)
+ANTHROPIC_TOOLS = [{"name": t["name"], "description": t["description"], "input_schema": t["parameters_json_schema"]} for t in TOOLS]
+# Giữ NGUYÊN prompt hệ thống ở mọi vòng: khối suy nghĩ của Claude gắn với prompt đã tạo ra nó, đổi prompt giữa chừng là lỗi 400.
+LOOKUP_NOTE = ("\n- Trước khi trả lời câu hỏi về dữ kiện công ty BẮT BUỘC gọi công cụ tra cứu ít nhất một lần; không trả lời ngay từ "
+               "trí nhớ (kể cả khi định kết luận \"chưa có\"). Đã tra cứu đủ thì trả lời.\n"
+               "- Cần nhiều công cụ độc lập với nhau thì gọi TẤT CẢ trong cùng một lượt (không gọi lần lượt từng cái) để trả lời nhanh hơn.")
 
 
-def _answer_gemini(history: list[dict], model: str, system: str, user: dict, audit: dict) -> dict:
-    gemini = client()
-    config = types.GenerateContentConfig(
-        system_instruction=system,
-        tools=[types.Tool(function_declarations=[types.FunctionDeclaration(**t) for t in TOOLS])],
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.HIGH),
-        max_output_tokens=16000,
-    )
-    # vòng đầu bắt buộc gọi công cụ: để "auto" thì mô hình có lúc trả lời luôn mà không tra cứu (rồi kết luận "chưa có")
-    first_config = config.model_copy(update={"tool_config": types.ToolConfig(
-        function_calling_config=types.FunctionCallingConfig(mode="ANY"))})
+def _cache_tail(messages: list[dict]) -> list[dict]:
+    """Đặt mốc cache ở cuối lượt gửi: kết quả tra cứu của các vòng trước được đọc từ cache (0.1x giá) thay vì tính đủ giá
+    ở mỗi vòng. Chỉ sao chép tin cuối, không sửa `messages` gốc nên mốc không dồn lại qua các vòng."""
+    last = messages[-1]
+    content = last["content"]
+    blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+    if not blocks or not isinstance(blocks[-1], dict):
+        return messages
+    blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+    return [*messages[:-1], {**last, "content": blocks}]
 
-    contents = [types.Content(role="model" if m["role"] == "assistant" else "user",
-                              parts=[types.Part.from_text(text=m["content"])])
+
+def _answer_anthropic(history: list[dict], model: str, system: str, user: dict, audit: dict) -> dict:
+    """Claude: vòng lặp gọi công cụ chỉ-đọc. Giữ nguyên khối suy nghĩ của model khi gửi lại ở vòng sau."""
+    claude = client(120)
+    # Hai khối hệ thống: phần cố định (prompt + công cụ, giống hệt với mọi người) có cache_control nên người sau đọc cache của
+    # người trước; phần riêng (ngày, tên người hỏi, ghi chú bộ nhớ) để sau, không cache, kẻo mỗi người một bản cache.
+    static, dynamic = (SYSTEM_PROMPT, system[len(SYSTEM_PROMPT):]) if system.startswith(SYSTEM_PROMPT) else (system, "")
+    system = [{"type": "text", "text": static + LOOKUP_NOTE, "cache_control": {"type": "ephemeral"}}]
+    if dynamic.strip():
+        system.append({"type": "text", "text": dynamic.strip()})
+    # Claude Opus 5.5 / Sonnet 5.5 không cho ép tool_choice: nhắc trong prompt thay vì ép.
+    messages = [{"role": "assistant" if m["role"] == "assistant" else "user", "content": m["content"]}
                 for m in history if m.get("content")]
     tools_used: list[str] = []
+    light = _is_weak(model)  # model nhẹ: không suy nghĩ sâu và ít vòng tra cứu hơn (giữ chi phí mỗi câu thấp)
+    extra = {} if light else {"thinking": {"type": "adaptive"}}
+
+    def call(tool_choice: dict):
+        """Gọi theo luồng để đẩy chữ về giao diện ngay khi model viết; trả về message đầy đủ như messages.create."""
+        _preview_text(audit, "", force=True)  # vòng mới: xoá bản xem trước của vòng trước (VD: lời dẫn trước khi tra cứu)
+        text = ""
+        with claude.messages.stream(
+                model=model, max_tokens=16000, system=system, messages=_cache_tail(messages), tools=ANTHROPIC_TOOLS,
+                tool_choice=tool_choice, output_config={"effort": ANTHROPIC_EFFORT}, **extra) as stream:
+            for piece in stream.text_stream:
+                text += piece
+                _preview_text(audit, text)
+            final = stream.get_final_message()
+            record_usage(audit, model, getattr(final, "usage", None))
+            return final
 
     try:
-        for round_no in range(MAX_TOOL_ROUNDS):
-            response = _gemini_generate(gemini, contents, first_config if round_no == 0 else config, model)
-            if response.prompt_feedback and response.prompt_feedback.block_reason:
+        for round_no in range(LIGHT_TOOL_ROUNDS if light else MAX_TOOL_ROUNDS):
+            response = call({"type": "auto"})
+            if response.stop_reason == "refusal":
                 return {"answer": "Yêu cầu này bị từ chối bởi bộ lọc an toàn của mô hình. Hãy diễn đạt lại câu hỏi.",
                         "tools_used": tools_used}
-            reason = _finish_reason(response)
-            calls = response.function_calls
+            calls = [b for b in response.content if b.type == "tool_use"]
             if not calls:
-                if reason in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"):
-                    return {"answer": "Yêu cầu này bị từ chối bởi bộ lọc an toàn của mô hình. Hãy diễn đạt lại câu hỏi.",
-                            "tools_used": tools_used}
-                text = (response.text or "").strip()
+                text = message_text(response)
                 if not text:
                     return {"answer": EMPTY_ANSWER, "tools_used": tools_used, "error": "empty"}
-                if reason == "MAX_TOKENS":
+                if response.stop_reason == "max_tokens":
                     text += TRUNCATED_NOTE
                 return {"answer": text, "tools_used": tools_used}
 
-            # giữ nguyên nội dung model trả về (kèm thought signature) để Gemini tiếp tục mạch suy luận
-            contents.append(response.candidates[0].content)
+            messages.append({"role": "assistant", "content": response.content})  # giữ nguyên cả khối suy nghĩ
             results = []
-            for call in calls:
-                tools_used.append(call.name)
-                _progress(audit, call.name)
+            for call_block in calls:
+                tools_used.append(call_block.name)
+                _progress(audit, call_block.name)
                 try:
-                    out = _run_tool(call.name, dict(call.args or {}), user, audit)
-                    payload = {"result": json.loads(json.dumps(out, ensure_ascii=False, default=str))}
+                    out = _run_tool(call_block.name, dict(call_block.input or {}), user, audit)
+                    content = json.dumps({"result": out}, ensure_ascii=False, default=str, separators=(",", ":"))
+                    results.append({"type": "tool_result", "tool_use_id": call_block.id, "content": content})
                 except Exception as e:
-                    payload = {"error": str(e)}
-                results.append(types.Part.from_function_response(name=call.name, response=payload))
-            contents.append(types.Content(role="user", parts=results))
+                    results.append({"type": "tool_result", "tool_use_id": call_block.id, "is_error": True,
+                                    "content": json.dumps({"error": str(e)}, ensure_ascii=False)})
+            messages.append({"role": "user", "content": results})
 
         # hết số vòng tra cứu: buộc mô hình kết luận bằng dữ liệu đã có thay vì bỏ cuộc
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(
-            text="Dừng tra cứu. Trả lời ngay bằng dữ liệu đã có, nói rõ phần nào dữ liệu chưa có.")]))
-        final_config = types.GenerateContentConfig(
-            system_instruction=system,
-            tools=config.tools,
-            tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode="NONE")),
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            max_output_tokens=16000,
-        )
-        response = _gemini_generate(gemini, contents, final_config, model)
-        text = (response.text or "").strip()
+        messages.append({"role": "user", "content": "Dừng tra cứu. Trả lời ngay bằng dữ liệu đã có, nói rõ phần nào dữ liệu chưa có."})
+        response = call({"type": "none"})
+        text = message_text(response)
         if text:
             return {"answer": text, "tools_used": tools_used}
         return {"answer": "Trợ lý đã tra cứu quá nhiều bước mà chưa kết luận. Hãy hỏi cụ thể hơn.", "tools_used": tools_used}
-    except errors.APIError as e:
-        if e.code in (401, 403) or (e.code == 400 and "API key" in str(e.message)):
-            return {"answer": "Khoá Gemini API không hợp lệ.", "tools_used": tools_used, "error": "auth"}
-        if e.code == 429:
-            return {"answer": f"Gemini đang vượt giới hạn gọi API, thử lại sau ít phút.\n\n_{e.message}_",
-                    "tools_used": tools_used, "error": "rate_limit"}
-        if e.code in GEMINI_RETRY_CODES:
-            return {"answer": f"Gemini đang quá tải ({e.code}).", "tools_used": tools_used, "error": "overload"}
-        return {"answer": f"Lỗi từ Gemini API ({e.code}): {e.message}", "tools_used": tools_used, "error": "api"}
-    except httpx.TransportError:
-        return {"answer": "Không kết nối được tới Gemini API. Kiểm tra mạng.", "tools_used": tools_used, "error": "network"}
+    except anthropic.AuthenticationError:
+        return {"answer": "Khoá Anthropic API không hợp lệ.", "tools_used": tools_used, "error": "auth"}
+    except anthropic.PermissionDeniedError:
+        return {"answer": "Khoá Anthropic API không có quyền dùng mô hình này.", "tools_used": tools_used, "error": "auth"}
+    except anthropic.RateLimitError as e:
+        return {"answer": f"Anthropic đang vượt giới hạn gọi API, thử lại sau ít phút.\n\n_{e.message}_",
+                "tools_used": tools_used, "error": "rate_limit"}
+    except anthropic.APIStatusError as e:
+        if e.status_code >= 500:  # gồm 529 overloaded
+            return {"answer": f"Anthropic đang quá tải ({e.status_code}).", "tools_used": tools_used, "error": "overload"}
+        return {"answer": f"Lỗi từ Anthropic API ({e.status_code}): {e.message}", "tools_used": tools_used, "error": "api"}
+    except anthropic.APIConnectionError:
+        return {"answer": "Không kết nối được tới Anthropic API. Kiểm tra mạng.", "tools_used": tools_used, "error": "network"}
 
 
 # Gói Groq miễn phí giới hạn ~8000 token/phút cho cả request, nên phải cắt bớt kết quả tool.
@@ -681,7 +850,7 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _answer_groq(history: list[dict], model: str, system: str, user: dict, audit: dict) -> dict:
-    """Groq (API tương thích OpenAI): vòng lặp gọi tool tương tự bản Gemini."""
+    """Groq (API tương thích OpenAI): vòng lặp gọi tool tương tự bản Anthropic."""
     headers = {"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}"}
     tools = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                 "parameters": t["parameters_json_schema"]}} for t in TOOLS]
@@ -693,7 +862,7 @@ def _answer_groq(history: list[dict], model: str, system: str, user: dict, audit
     try:
         with httpx.Client(timeout=120) as http:
             for round_no in range(MAX_TOOL_ROUNDS):
-                # vòng đầu bắt buộc gọi công cụ (xem ghi chú ở _answer_gemini)
+                # vòng đầu bắt buộc gọi công cụ (xem ghi chú ở _answer_anthropic)
                 body = {"model": model, "messages": messages, "tools": tools,
                         "tool_choice": "required" if round_no == 0 else "auto",
                         "max_completion_tokens": 16000}

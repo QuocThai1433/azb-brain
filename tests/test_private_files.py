@@ -241,7 +241,7 @@ class ApiTest(unittest.TestCase):
             ocr.assert_called_once()
         self.assertEqual(self.status(fid), "ok")
 
-    def test_gemini_quota_error_is_reported_not_raised(self):
+    def test_ai_quota_error_is_reported_not_raised(self):
         fid = self.upload("mgrA", "anh-dan-2.png", self.PNG, "image/png").json()["id"]
 
         class Quota(Exception):

@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import access, ai, analytics, auditlog, auth, backup, contacts, documents, export, guard, hr_import, memory, offboarding, privatefiles, selfinfo, semantic, webimport
+from . import access, ai, analytics, auditlog, auth, backup, budget, contacts, documents, export, guard, hr_import, memory, offboarding, privatefiles, selfinfo, semantic, webimport
 from .db import connect, init_db, row, rows
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
@@ -1280,7 +1280,7 @@ def list_documents(request: Request, unit_id: int | None = None):
 def documents_meta(request: Request):
     user = auth.require_permission(request, "docs_view")
     return {"types": documents.DOC_TYPES, "allowed_ext": sorted(documents.ALLOWED_EXT),
-            "max_mb": documents.MAX_UPLOAD_BYTES // (1024 * 1024), "ocr_available": ai.has_gemini(),
+            "max_mb": documents.MAX_UPLOAD_BYTES // (1024 * 1024), "ocr_available": ai.has_anthropic(),
             "levels": [[k, access.LEVELS[k]] for k in access.settable_levels(user)], "default_level": access.DEFAULT_LEVEL}
 
 
@@ -1606,7 +1606,7 @@ def my_files_meta(request: Request):
     user = auth.require_ai(request)
     with connect() as conn:
         return {"allowed_ext": sorted(documents.ALLOWED_EXT), "max_mb": documents.MAX_UPLOAD_BYTES // (1024 * 1024),
-                "ocr_available": ai.has_gemini(), "ocr_daily_limit": privatefiles.OCR_DAILY_LIMIT,
+                "ocr_available": ai.has_anthropic(), "ocr_daily_limit": privatefiles.OCR_DAILY_LIMIT,
                 "usage": privatefiles.usage(conn, user)}
 
 
@@ -1676,6 +1676,8 @@ def read_my_file(doc_id: int, request: Request):
         d = privatefiles.get_file(conn, user, doc_id)
         if d["owner_id"] != user["id"]:
             raise HTTPException(403, "Chỉ chủ file mới đọc lại được")
+        if over := budget.check(conn, user):  # tiền đọc scan/ảnh tính vào trần chi tiêu AI của người này
+            raise HTTPException(429, over)
         if not privatefiles.ocr_take(conn, user["id"]):
             raise HTTPException(429, f"Hôm nay bạn đã dùng hết {privatefiles.OCR_DAILY_LIMIT} lượt đọc ảnh/scan. Mai thử lại nhé.")
     documents.process_document(doc_id, use_ocr=True)
@@ -1858,6 +1860,7 @@ def get_insights(request: Request):
 class ChatRequest(BaseModel):
     content: str
     conversation_id: int | None = None  # bỏ trống = bắt đầu đoạn chat mới
+    model: str | None = None  # model Claude chọn trong khung chat; bỏ trống = mặc định của máy chủ
 
 
 def _own_conversation(conn, user: dict, conv_id: int) -> dict:
@@ -1893,9 +1896,11 @@ def get_conversation(conv_id: int, request: Request):
         for m in msgs:
             m["content"] = selfinfo.apply_marker(
                 conn, user, contacts.render(m["content"], emps, can_see, user.get("employee_id")))
+        last = row(conn, "SELECT model FROM ai_query_log WHERE conversation_id = ? AND model IS NOT NULL"
+                         " ORDER BY id DESC LIMIT 1", (conv_id,))
     for m in msgs:
         m["tools"] = json.loads(m.pop("tools_used") or "[]")
-    return {**conv, "messages": msgs}
+    return {**conv, "messages": msgs, "model": conv.get("model") or (last["model"] if last else None)}
 
 
 @app.put("/api/conversations/{conv_id}")
@@ -1941,6 +1946,21 @@ def chat(req: ChatRequest, request: Request, background: BackgroundTasks):
     return _run_chat(req, user, background)
 
 
+STREAM_PING_SECONDS = 15
+
+
+class PrecheckRequest(BaseModel):
+    content: str
+
+
+@app.post("/api/chat/precheck")
+def chat_precheck(req: PrecheckRequest, request: Request):
+    """Câu hỏi có cần suy luận không: trả đề nghị nâng model (Sonnet/Opus) để giao diện hỏi người dùng trước khi gửi.
+    Chỉ so từ khoá trong máy chủ, không gọi AI nên không tốn tiền."""
+    auth.require_ai(request)
+    return {"offer": ai.upgrade_offer(req.content[:guard.MAX_QUESTION_CHARS])}
+
+
 @app.post("/api/chat/stream")
 def chat_stream(req: ChatRequest, request: Request):
     """Như /api/chat nhưng trả theo luồng SSE: mỗi công cụ AI gọi được báo ngay ("tool"), cuối cùng là "done" hoặc "error".
@@ -1951,7 +1971,8 @@ def chat_stream(req: ChatRequest, request: Request):
 
     def worker() -> None:
         try:
-            out = _run_chat(req, user, background, progress=lambda tool: events.put(("tool", tool)))
+            out = _run_chat(req, user, background, progress=lambda tool: events.put(("tool", tool)),
+                            on_text=lambda text: events.put(("text", text)))
             events.put(("done", out))
         except HTTPException as e:
             events.put(("error", e.detail if isinstance(e.detail, str) else "Yêu cầu không hợp lệ"))
@@ -1962,22 +1983,28 @@ def chat_stream(req: ChatRequest, request: Request):
 
     def stream():
         while True:
-            kind, data = events.get()
+            try:
+                kind, data = events.get(timeout=STREAM_PING_SECONDS)
+            except queue.Empty:
+                yield ": ping\n\n"  # giữ kết nối: tunnel/mạng di động cắt luồng im lặng quá lâu; frontend bỏ qua dòng này
+                continue
             if kind == "tool":
                 payload = {"type": "tool", "tool": data}
+            elif kind == "text":
+                payload = {"type": "text", "text": data}
             elif kind == "done":
                 payload = {"type": "done", **data}
             else:
                 payload = {"type": "error", "detail": data}
             yield f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
-            if kind != "tool":
+            if kind not in ("tool", "text"):
                 return
 
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     return StreamingResponse(stream(), media_type="text/event-stream", headers=headers, background=background)
 
 
-def _run_chat(req: ChatRequest, user: dict, background: BackgroundTasks, progress=None) -> dict:
+def _run_chat(req: ChatRequest, user: dict, background: BackgroundTasks, progress=None, on_text=None) -> dict:
     # SĐT/email trong câu hỏi không được gửi cho nhà cung cấp AI hay lưu vào lịch sử
     content = contacts.scrub(req.content.strip())
     if not content:
@@ -1986,6 +2013,8 @@ def _run_chat(req: ChatRequest, user: dict, background: BackgroundTasks, progres
         raise HTTPException(400, f"Câu hỏi quá dài (tối đa {guard.MAX_QUESTION_CHARS} ký tự)")
     guard.check_ai_rate(user["id"])
     with connect() as conn:
+        if over := budget.check(conn, user):
+            raise HTTPException(429, over)
         history = []
         if req.conversation_id:
             _own_conversation(conn, user, req.conversation_id)
@@ -1999,14 +2028,17 @@ def _run_chat(req: ChatRequest, user: dict, background: BackgroundTasks, progres
         ai_content += "\n\n[Hệ thống: " + " ".join(notes) + " Hãy báo người dùng điều này, đừng đoán nội dung file.]"
     with connect() as conn:
         mem = memory.context(conn, user["id"])  # '' nếu người dùng chưa bật bộ nhớ cá nhân
-    res = ai.answer(history + [{"role": "user", "content": ai_content}], user, audit=ai.new_audit(progress), memory=mem)
+    res = ai.answer(history + [{"role": "user", "content": ai_content}], user, audit=ai.new_audit(progress, on_text), memory=mem, model=req.model)
     trail = res.pop("audit", {"flags": [], "docs_read": []})
+    usage = trail.get("usage") or {}
     with connect() as conn:  # nhật ký mọi câu hỏi AI (kể cả lượt lỗi): ai hỏi gì, AI đọc tài liệu nào, có nội dung đáng ngờ không
         conn.execute(
-            "INSERT INTO ai_query_log (user_id, conversation_id, question, tools, docs_read, flags, model, error)"
-            " VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO ai_query_log (user_id, conversation_id, question, tools, docs_read, flags, model, error,"
+            " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (user["id"], req.conversation_id, content[:2000], json.dumps(res.get("tools_used") or []),
-             json.dumps(trail["docs_read"]), json.dumps(trail["flags"], ensure_ascii=False), res.get("model"), res.get("error")))
+             json.dumps(trail["docs_read"]), json.dumps(trail["flags"], ensure_ascii=False), res.get("model"), res.get("error"),
+             usage.get("input"), usage.get("output"), usage.get("cache_read"), usage.get("cache_write"), usage.get("cost_usd")))
     if res.get("error"):  # không lưu lượt lỗi để lần hỏi lại không gửi kèm câu trả lời lỗi cho AI
         return {**res, "conversation_id": req.conversation_id}
     # câu trả lời AI viết: che số lạ; dấu [[LH:id]] được giữ lại trong lịch sử, số chỉ điền khi hiển thị
@@ -2023,7 +2055,8 @@ def _run_chat(req: ChatRequest, user: dict, background: BackgroundTasks, progres
             "INSERT INTO chat_messages (conversation_id, role, content, tools_used) VALUES (?, ?, ?, ?)",
             [(conv_id, "user", content, None),
              (conv_id, "assistant", answer, json.dumps(res.get("tools_used") or [], ensure_ascii=False))])
-        conn.execute("UPDATE conversations SET updated_at = datetime('now','localtime') WHERE id = ?", (conv_id,))
+        conn.execute("UPDATE conversations SET updated_at = datetime('now','localtime'), model = COALESCE(?, model)"
+                     " WHERE id = ?", (res.get("model"), conv_id))
         title = conn.execute("SELECT title FROM conversations WHERE id = ?", (conv_id,)).fetchone()[0]
         shown = selfinfo.apply_marker(conn, user, contacts.render_for_viewer(conn, answer, can_see, user.get("employee_id")))
     with connect() as conn:
@@ -2059,6 +2092,19 @@ def ai_audit(request: Request, limit: int = 200, flagged_only: bool = False):
                          + (" WHERE l.flags != '[]'" if flagged_only else "") + " ORDER BY l.id DESC LIMIT ?",
                    (max(1, min(limit, 1000)),))
     return out
+
+
+@app.get("/api/ai/usage")
+def ai_usage(request: Request, days: int = 7):
+    """Chi phí AI ngoài khung chat (OCR, đối chiếu scan, tóm tắt web, bộ nhớ) và tổng theo loại việc (chỉ admin)."""
+    auth.require_roles(request, {"admin"})
+    since = f"-{max(1, min(days, 365))} days"
+    with connect() as conn:
+        recent = rows(conn, "SELECT * FROM ai_usage_log WHERE ts >= datetime('now','localtime',?) ORDER BY id DESC LIMIT 200", (since,))
+        totals = rows(conn, "SELECT kind, model, COUNT(*) AS calls, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,"
+                            " ROUND(SUM(cost_usd), 4) AS cost_usd FROM ai_usage_log WHERE ts >= datetime('now','localtime',?)"
+                            " GROUP BY kind, model ORDER BY cost_usd DESC", (since,))
+    return {"totals": totals, "recent": recent}
 
 
 @app.get("/api/admin/backups")

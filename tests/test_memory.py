@@ -54,7 +54,7 @@ class MemoryCase(unittest.TestCase):
 
     @staticmethod
     def fake(*notes):
-        return lambda system, prompt, max_tokens=0: json.dumps({"notes": [{"text": t, "kind": k} for t, k in notes]})
+        return lambda system, prompt, max_tokens=0, light_first=False: json.dumps({"notes": [{"text": t, "kind": k} for t, k in notes]})
 
 
 class FilterTest(MemoryCase):
@@ -213,7 +213,7 @@ class ApiTest(MemoryCase):
         b.post("/api/memory", json={"text": "Phụ trách mảng tài chính kế toán."})
         seen = []
 
-        def fake_answer(history, user, audit=None, memory=""):
+        def fake_answer(history, user, audit=None, memory="", model=None):
             seen.append((user["username"], memory))
             return {"answer": "ok", "tools_used": []}
         with mock.patch.object(ai, "answer", fake_answer):

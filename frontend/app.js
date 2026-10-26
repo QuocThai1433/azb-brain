@@ -1657,7 +1657,7 @@ const VIEWS = {
       <div class="toolbar"><h2 style="margin:0">Kho tài liệu (${docs.length})</h2>
         ${can("docs_edit") ? DOC_ACTIONS : ""}</div>
       <p class="muted">Quy trình ISO, hướng dẫn, biểu mẫu, quy định. Tối đa ${meta.max_mb} MB mỗi file; PDF scan được AI đọc
-        ${meta.ocr_available ? "" : '<span class="badge warn">cần khoá Gemini API</span>'}
+        ${meta.ocr_available ? "" : '<span class="badge warn">cần khoá Anthropic API</span>'}
         <span class="doc-formats" title="${esc(meta.allowed_ext.join(", "))}">· Định dạng hỗ trợ</span></p>
       ${(() => {
         const unread = docs.filter((d) => DOC_UNREAD.has(d.extract_status));
@@ -2310,7 +2310,7 @@ const VIEWS = {
     const canAttach = !!state.user.can_use_ai;  // file đính kèm lưu ở kho riêng của từng tài khoản (không vào thư viện chung)
     const attachMeta = canAttach ? await api("/api/my-files/meta").catch(() => null) : null;
     main.innerHTML = `
-      <div class="cg ${state.chatSidebar === false ? "side-closed" : ""}" id="cg">
+      <div class="cg ${(state.chatSidebar ?? !matchMedia("(max-width: 960px)").matches) ? "" : "side-closed"}" id="cg">
         <aside class="cg-side">
           <div class="cg-side-head">
             <button class="cg-new" id="new-chat" title="Đoạn chat mới"><span class="plus">+</span> Đoạn chat mới</button>
@@ -2333,6 +2333,19 @@ const VIEWS = {
               ${canAttach ? `<button class="cg-attach" id="attach" type="button" title="Đính kèm tài liệu, ảnh, file ghi âm (hoặc Ctrl+V để dán ảnh)">${icon("upload")}</button>
               <input type="file" id="attach-file" hidden multiple>` : ""}
               <textarea id="q" rows="1" placeholder="Hỏi trợ lý điều hành AZB..."></textarea>
+              ${ai.models?.length ? `<div class="cg-pick" id="cg-pick">
+                <button type="button" class="cg-pick-btn" id="cg-pick-btn" aria-haspopup="listbox" aria-expanded="false" title="Chọn model để trả lời">
+                  <span id="cg-pick-label"></span>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+                </button>
+                <div class="cg-pick-menu" id="cg-pick-menu" role="listbox" hidden>
+                  <div class="cg-pick-head">Model trả lời</div>
+                  ${ai.models.map((m) => `<button type="button" role="option" class="cg-pick-opt" data-id="${esc(m.id)}">
+                    <span class="mt"><b>${esc(modelName(m.label))}</b><small>${esc(m.hint)}</small></span>
+                    <svg class="ck" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"/></svg>
+                  </button>`).join("")}
+                </div>
+              </div>` : ""}
               <button class="cg-send" id="send" type="submit" title="Gửi (Enter)">↑</button>
             </form>
             <div class="cg-quota" id="cg-quota"></div>
@@ -2342,6 +2355,39 @@ const VIEWS = {
       </div>`;
 
     const log = $("#log"), q = $("#q");
+    // Chọn model: menu tuỳ biến (thay cho <select> gốc), nhớ lựa chọn trên trình duyệt này
+    let chatModel = null;
+    let modelLocked = false;  // đã chọn model (ở ô chọn hoặc trả lời hộp hỏi nâng model) trong đoạn chat này: không hỏi nâng nữa
+    let closeAsk = null;      // đóng hộp hỏi nâng model đang hiện (coi như huỷ gửi)
+    let resetModel = () => {};  // đoạn chat mới: về lại model mặc định của người dùng
+    let showModel = () => {};  // mở lại đoạn chat cũ: hiện đúng model đã trả lời đoạn đó
+    if ($("#cg-pick")) {
+      let saved = null;
+      try { saved = localStorage.getItem("azb_chat_model"); } catch {}
+      const ids = ai.models.map((m) => m.id);
+      chatModel = ids.includes(saved) ? saved : ids.includes(ai.default_model) ? ai.default_model : ids[0];
+      let baseModel = chatModel;  // model người dùng đã chọn làm thói quen; đoạn chat mới bắt đầu từ đây (nâng model trong một đoạn chat không đổi nó)
+      resetModel = () => { chatModel = baseModel; paint(); };
+      const pick = $("#cg-pick"), btn = $("#cg-pick-btn"), menu = $("#cg-pick-menu");
+      const paint = () => {
+        $("#cg-pick-label").textContent = modelName(ai.models.find((m) => m.id === chatModel).label);
+        menu.querySelectorAll(".cg-pick-opt").forEach((o) => o.setAttribute("aria-selected", String(o.dataset.id === chatModel)));
+      };
+      showModel = (id) => { if (ids.includes(id)) { chatModel = id; paint(); } };
+      const setOpen = (on) => { menu.hidden = !on; btn.setAttribute("aria-expanded", String(on)); pick.classList.toggle("open", on); };
+      btn.onclick = () => setOpen(menu.hidden);
+      menu.querySelectorAll(".cg-pick-opt").forEach((o) => (o.onclick = () => {
+        chatModel = baseModel = o.dataset.id;
+        modelLocked = true;
+        try { localStorage.setItem("azb_chat_model", chatModel); } catch {}
+        paint();
+        setOpen(false);
+        $("#q")?.focus();
+      }));
+      document.addEventListener("click", (e) => { if (!pick.isConnected) return; if (!pick.contains(e.target)) setOpen(false); });
+      pick.addEventListener("keydown", (e) => { if (e.key === "Escape") { setOpen(false); btn.focus(); e.stopPropagation(); } });
+      paint();
+    }
     const jobOf = (convId) => [...state.jobs.values()].find((j) => j.convId === convId);
     const currentJob = () => (state.chatJob ? state.jobs.get(state.chatJob) : state.chatId != null ? jobOf(state.chatId) : null);
     const setBusy = () => { const b = $("#send"); if (b) b.disabled = !!currentJob(); };
@@ -2376,7 +2422,7 @@ const VIEWS = {
       const name = state.user.full_name || state.user.username;
       log.innerHTML = `
         <div class="cg-welcome">
-          <div class="cg-logo">AZB</div>
+          <div class="cg-logo">${icon("spark")}</div>
           <h2>Xin chào ${esc(name)}, hôm nay cần nắm thông tin gì?</h2>
           <p class="muted">Hỏi về tổ chức, nhân sự, quy trình, tài liệu, mục tiêu. Trợ lý tra cứu trực tiếp dữ liệu công ty.</p>
           <div class="cg-suggest">${CHAT_SUGGESTIONS.map((s) => `<button>${esc(s)}</button>`).join("")}</div>
@@ -2385,47 +2431,89 @@ const VIEWS = {
     };
     const scroll = () => (log.scrollTop = log.scrollHeight);
     const pendingHtml = (job) => msgHtml({ role: "user", content: job.text }) + `<div class="msg assistant pending" id="pending"><div class="av">AZB</div>
-        <div class="body"><span class="dots"><i></i><i></i><i></i></span> <span class="prog">${job.progress ? "Đang tra cứu: " + esc(job.progress) + "…" : "Đang tra cứu dữ liệu và phân tích..."}</span> <span class="esc-hint muted">· nhấn Esc để dừng</span></div></div>`;
+        <div class="body"><span class="dots"><i></i><i></i><i></i></span> <span class="prog">${job.progress ? "Đang tra cứu: " + esc(job.progress) + "…" : "Đang tra cứu dữ liệu và phân tích..."}</span> <span class="esc-hint muted">· nhấn Esc để dừng</span><div class="live">${job.partial ? partialHtml(job.partial) : ""}</div></div></div>`;
     const setProgress = (job) => {
       const el = document.querySelector("#pending .prog");
       if (el) el.textContent = `Đang tra cứu: ${job.progress}…`;
     };
+    // Chữ AI đang viết (máy chủ đã lọc ảnh/link, che SĐT/email); câu trả lời cuối thay thế bản này khi xong
+    const partialHtml = (text) => (window.marked ? marked.parse(esc(text).replace(/&gt;/g, ">")) : esc(text));
+    const setPartial = (job) => {
+      const el = document.querySelector("#pending .live");
+      if (!el || state.chatJob !== job.token) return;
+      const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+      el.innerHTML = job.partial ? partialHtml(job.partial) : "";
+      if (stick) scroll();
+    };
     // Gửi câu hỏi theo luồng SSE: cập nhật tiến trình khi AI gọi công cụ; trả về đúng kết quả như /api/chat
+    const serverErr = (msg) => Object.assign(new Error(msg), { server: true });
+    const readStream = async (job, body, ctrl) => {
+      const r = await fetch("/api/chat/stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: ctrl.signal });
+      if (r.status === 401) {
+        boot();
+        throw serverErr("Phiên đăng nhập đã hết hạn");
+      }
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw serverErr(typeof err.detail === "string" ? err.detail : `Lỗi máy chủ (${r.status})`);
+      }
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "", final = null;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf("\n\n")) >= 0) {
+          const line = buf.slice(0, i).trim();
+          buf = buf.slice(i + 2);
+          if (!line.startsWith("data:")) continue;  // dòng ": ping" giữ kết nối
+          const ev = JSON.parse(line.slice(5));
+          if (ev.type === "tool") {
+            job.progress = TOOL_LABELS[ev.tool] || "dữ liệu công ty";
+            setProgress(job);
+          } else if (ev.type === "text") {
+            job.partial = ev.text;
+            setPartial(job);
+          } else if (ev.type === "done") final = ev;
+          else if (ev.type === "error") throw serverErr(ev.detail);
+        }
+      }
+      if (!final) throw new Error("Mất kết nối khi đang trả lời.");
+      return final;
+    };
+    // Trình duyệt di động cắt kết nối khi người dùng rời app, nhưng máy chủ vẫn trả lời xong và lưu vào đoạn chat:
+    // lấy lại câu trả lời đã lưu thay vì báo lỗi (để người dùng không phải hỏi lại, tốn thêm hạn mức)
+    const recoverAnswer = async (job) => {
+      const base = await job.base;  // số tin của đoạn chat trước khi gửi (null: đoạn chat mới hoặc không đọc được)
+      for (let i = 0; i < 75 && !job.cancelled; i++) {  // tối đa ~5 phút
+        const prog = document.querySelector("#pending .prog");
+        if (prog && currentJob() === job) prog.textContent = "Mất kết nối (có thể do rời app). Câu trả lời vẫn được lưu, đang lấy lại…";
+        try {
+          const convId = job.convId ?? (await api("/api/conversations")).find((c) => !job.baseIds.has(c.id))?.id;
+          if (convId != null) {
+            const msgs = (await api(`/api/conversations/${convId}`)).messages;
+            const last = msgs[msgs.length - 1], asked = msgs[msgs.length - 2];
+            const saved = job.convId == null || (base != null ? msgs.length >= base + 2
+              : asked?.role === "user" && asked.content.slice(0, 40) === job.text.slice(0, 40));
+            if (saved && last?.role === "assistant") return { answer: last.content, tools_used: last.tools, conversation_id: convId };
+          }
+        } catch {}  // mạng chưa có lại: thử tiếp
+        await new Promise((r) => setTimeout(r, 4000));
+      }
+      throw new Error(job.cancelled ? "Đã dừng" : "Mất kết nối quá lâu. Hãy mở lại đoạn chat từ danh sách bên trái để xem câu trả lời (nếu đã có).");
+    };
     const streamChat = async (job, body) => {
       const ctrl = job.ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 180000);
+      job.baseIds = new Set(state.convs.map((c) => c.id));
+      job.base = job.convId != null ? api(`/api/conversations/${job.convId}`).then((c) => c.messages.length, () => null) : Promise.resolve(null);
       try {
-        const r = await fetch("/api/chat/stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: ctrl.signal });
-        if (r.status === 401) {
-          boot();
-          throw new Error("Phiên đăng nhập đã hết hạn");
-        }
-        if (!r.ok) {
-          const err = await r.json().catch(() => ({}));
-          throw new Error(typeof err.detail === "string" ? err.detail : `Lỗi máy chủ (${r.status})`);
-        }
-        const reader = r.body.getReader();
-        const dec = new TextDecoder();
-        let buf = "", final = null;
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buf += dec.decode(value, { stream: true });
-          let i;
-          while ((i = buf.indexOf("\n\n")) >= 0) {
-            const line = buf.slice(0, i).trim();
-            buf = buf.slice(i + 2);
-            if (!line.startsWith("data:")) continue;
-            const ev = JSON.parse(line.slice(5));
-            if (ev.type === "tool") {
-              job.progress = TOOL_LABELS[ev.tool] || "dữ liệu công ty";
-              setProgress(job);
-            } else if (ev.type === "done") final = ev;
-            else if (ev.type === "error") throw new Error(ev.detail);
-          }
-        }
-        if (!final) throw new Error("Mất kết nối khi đang trả lời, hãy thử lại.");
-        return final;
+        return await readStream(job, body, ctrl);
+      } catch (err) {
+        if (err.server || job.cancelled) throw err;
+        return await recoverAnswer(job);  // gồm cả lúc luồng treo quá 180 giây
       } finally {
         clearTimeout(timer);
       }
@@ -2434,6 +2522,9 @@ const VIEWS = {
     const open = async (id, token = null) => {
       state.chatId = id;
       state.chatJob = token;
+      closeAsk?.();
+      modelLocked = id != null || !!token;  // đoạn chat đã có (hoặc đang chờ trả lời) coi như đã chọn; đoạn chat trống thì hỏi lại từ đầu
+      if (id == null && !token) resetModel();
       if (id != null) state.unseen.delete(id);
       renderList();
       setBusy();
@@ -2458,6 +2549,7 @@ const VIEWS = {
         if (!job || state.jobs.has(job.token)) break; // job xong giữa lúc tải → tải lại để có câu trả lời
       }
       job = jobOf(id);
+      showModel(conv.model);
       log.innerHTML = `<div class="cg-thread">${conv.messages.map(msgHtml).join("")}${job ? pendingHtml(job) : ""}</div>`;
       setBusy();
       scroll();
@@ -2545,9 +2637,47 @@ const VIEWS = {
       });
     }
 
-    const send = async (text) => {
+    // Câu cần suy luận mà đang dùng model mặc định: hỏi người dùng có nâng model không (hộp hỏi nằm trong khung chat, không chặn màn hình).
+    // Trả về id model đã chọn, null nếu huỷ, undefined nếu không cần hỏi (câu tra cứu thường hoặc không kiểm tra được).
+    const askUpgrade = async (text) => {
+      let offer;
+      try { offer = (await api("/api/chat/precheck", { method: "POST", body: { content: text } })).offer; } catch { return undefined; }
+      if (!offer) return undefined;
+      if (!log.querySelector(".cg-thread")) log.innerHTML = `<div class="cg-thread"></div>`;
+      const thread = log.querySelector(".cg-thread");
+      return new Promise((resolve) => {
+        const card = document.createElement("div");
+        card.className = "msg assistant ask-model";
+        card.innerHTML = `<div class="av">AZB</div><div class="body"><div>${esc(offer.message)}</div>
+          <div class="msg-actions">${offer.options.map((o) => `<button type="button" class="primary" data-model="${esc(o.id)}">${esc(o.label)}</button>`).join(" ")}
+            <button type="button" data-model="${esc(ai.default_model)}">Giữ Haiku</button></div>
+          <small class="muted">${offer.options.map((o) => esc(o.label.replace("Dùng ", "") + ": " + o.hint)).join(" · ")} · Esc để huỷ</small></div>`;
+        const done = (v) => {
+          closeAsk = null;
+          card.remove();
+          if (v === null && !thread.children.length) welcome();  // huỷ khi đoạn chat còn trống: trả lại màn hình chào
+          resolve(v);
+        };
+        closeAsk = () => done(null);
+        card.onclick = (e) => { const b = e.target.closest("button[data-model]"); if (b) done(b.dataset.model); };
+        thread.appendChild(card);
+        scroll();
+      });
+    };
+
+    const send = async (text, model = chatModel) => {
       text = text.trim();
+      if (closeAsk) return;  // đang chờ người dùng trả lời hộp hỏi nâng model
       if (attached.some((a) => a.status === "uploading" || a.status === "processing")) return toast("Đợi trợ lý đọc xong file đính kèm rồi hãy gửi.");
+      if (text && !modelLocked && model === ai.default_model && !currentJob()) {
+        const picked = await askUpgrade(text);
+        if (picked === null) return;  // huỷ: câu hỏi vẫn nằm trong ô nhập
+        if (picked !== undefined) {
+          modelLocked = true;  // đã chọn trong đoạn chat này: không hỏi lại
+          model = picked;
+          showModel(picked);  // các câu sau trong đoạn chat này dùng model vừa chọn
+        }
+      }
       const ready = attached.filter((a) => a.status === "ok");
       if (ready.length) {
         const list = ready.map((a) => `"${a.name}" (id tài liệu ${a.id})`).join(", ");
@@ -2568,7 +2698,7 @@ const VIEWS = {
       setBusy();
       let res;
       try {
-        res = await streamChat(job, { content: text, conversation_id: job.convId });
+        res = await streamChat(job, { content: text, conversation_id: job.convId, model });
       } catch (err) {
         if (job.cancelled) res = { answer: "Đã dừng trả lời theo yêu cầu (nhấn Esc). Câu hỏi được trả lại ô nhập để bạn sửa hoặc gửi lại.", error: "client" };
         else {
@@ -2584,11 +2714,12 @@ const VIEWS = {
       q.style.height = "auto";
       q.style.height = Math.min(q.scrollHeight, 220) + "px";
     };
-    q.oninput = autosize;
-    // Esc: dừng câu trả lời đang chờ của đoạn chat đang xem
+    q.oninput = () => { closeAsk?.(); autosize(); };  // gõ tiếp thì bỏ hộp hỏi nâng model
+    // Esc: huỷ hộp hỏi nâng model, hoặc dừng câu trả lời đang chờ của đoạn chat đang xem
     if (window.__chatEsc) document.removeEventListener("keydown", window.__chatEsc);
     window.__chatEsc = (e) => {
       if (e.key !== "Escape" || !$("#cg")) return;
+      if (closeAsk) { closeAsk(); return; }
       const job = currentJob();
       if (job?.ctrl && !job.cancelled) { job.cancelled = true; job.ctrl.abort(); }
     };
@@ -2603,7 +2734,9 @@ const VIEWS = {
       e.preventDefault();
       send(q.value);
     };
-    $("#new-chat").onclick = $("#new-chat-2").onclick = () => open(null);
+    // màn hình hẹp: khung lịch sử là lớp phủ, chọn xong thì đóng lại để thấy nội dung chat
+    const closeSideIfNarrow = () => { if (matchMedia("(max-width: 960px)").matches) toggleSide(false); };
+    $("#new-chat").onclick = $("#new-chat-2").onclick = () => { open(null); closeSideIfNarrow(); };
     // Lưu câu trả lời của AI thành đề xuất: tiêu đề lấy từ dòng đầu, nội dung là toàn bộ câu trả lời
     log.addEventListener("click", async (e) => {
       const btn = e.target.closest(".save-prop");
@@ -2665,6 +2798,7 @@ const VIEWS = {
       if (!item) return;
       if (item.dataset.job) open(null, Number(item.dataset.job));
       else open(Number(item.dataset.id));
+      closeSideIfNarrow();
     };
     if (state.chatSeed) {  // câu hỏi soạn sẵn từ trang khác (VD: Mục tiêu doanh thu → Hỏi Trợ lý AI): mở đoạn chat mới và gửi luôn
       const seed = state.chatSeed;
@@ -2745,6 +2879,8 @@ function processFlow(text) {
   if (steps.length < 2) return "";
   return `<ol class="flow">${steps.map((s, i) => `<li class="${/^nếu\b/i.test(s) || s.includes("?") ? "flow-decision" : ""}"><span class="flow-n">${i + 1}</span>${esc(s)}</li>`).join("")}</ol>`;
 }
+
+const modelName = (label) => String(label).replace(/^Claude\s+/i, "");  // "Claude Opus 5.5" → "Opus 5.5"
 
 function msgHtml(m) {
   if (m.role === "user") return `<div class="msg user">${esc(m.content)}</div>`;

@@ -194,6 +194,18 @@ CREATE TABLE IF NOT EXISTS ai_query_log (
     error           TEXT
 );
 
+-- Nhật ký các lần gọi AI ngoài khung chat (OCR PDF/ảnh, đối chiếu bản scan, tóm tắt web, trích ghi chú): để biết tiền đi đâu
+CREATE TABLE IF NOT EXISTS ai_usage_log (
+    id            INTEGER PRIMARY KEY,
+    ts            TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    kind          TEXT NOT NULL,     -- ocr_pdf | ocr_image | verify_scan | web_summary | memory
+    label         TEXT,              -- tên file / trang web liên quan
+    model         TEXT,
+    input_tokens  INTEGER,
+    output_tokens INTEGER,
+    cost_usd      REAL
+);
+
 -- Chỉ mục tìm kiếm toàn văn, không phân biệt dấu tiếng Việt
 CREATE VIRTUAL TABLE IF NOT EXISTS doc_chunks USING fts5(
     text, doc_id UNINDEXED, chunk_no UNINDEXED, page UNINDEXED,
@@ -336,6 +348,14 @@ MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN register_note TEXT",  # bản ghi cũ: người đăng ký tự ghi phòng ban/SĐT trong một ô; không đưa cho AI
     "ALTER TABLE users ADD COLUMN register_unit TEXT",   # phòng ban / công trình người đăng ký chọn hoặc nhập, để admin xác minh; không đưa cho AI
     "ALTER TABLE users ADD COLUMN register_phone TEXT",  # số máy lẻ nội bộ (không bắt buộc); không đưa cho AI
+    "ALTER TABLE conversations ADD COLUMN model TEXT",  # model đã trả lời lượt gần nhất (hiện lại khi mở đoạn chat)
+    "ALTER TABLE ai_query_log ADD COLUMN input_tokens INTEGER",
+    "ALTER TABLE ai_query_log ADD COLUMN output_tokens INTEGER",
+    "ALTER TABLE ai_query_log ADD COLUMN cache_read_tokens INTEGER",
+    "ALTER TABLE ai_query_log ADD COLUMN cache_write_tokens INTEGER",
+    "ALTER TABLE ai_query_log ADD COLUMN cost_usd REAL",  # chi phí ước tính của cả câu hỏi (mọi vòng tra cứu)
+    "ALTER TABLE ai_usage_log ADD COLUMN user_id INTEGER",  # người gây ra lần gọi (chủ file / người tải lên), để tính vào trần cá nhân
+    "ALTER TABLE documents ADD COLUMN content_hash TEXT",   # sha256 của file gốc: file trùng thì dùng lại kết quả đã đọc, khỏi tốn AI
 ]
 
 
@@ -369,6 +389,8 @@ def init_db() -> None:
                          " SELECT user_id, 'docs_download' FROM user_permissions WHERE feature IN ('docs_view', 'docs_edit')")
             conn.execute("PRAGMA user_version = 1")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents(owner_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(content_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_usage_user ON ai_usage_log(user_id, ts)")
         # mỗi hồ sơ nhân sự chỉ gắn với một tài khoản (tránh hai tài khoản cùng xem được thông tin cá nhân của một người)
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_employee ON users(employee_id) WHERE employee_id IS NOT NULL")
         # tài khoản đã khoá từ trước khi có cột này: bắt đầu tính 90 ngày từ lúc nâng cấp
