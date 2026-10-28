@@ -227,6 +227,17 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual({k["kind"] for k in rep["by_kind"]}, {"chat", "ocr_pdf"})
         self.assertEqual(rep["by_user"][0]["name"], "An")
 
+    def test_report_recent_lists_each_call_newest_first_with_cache_tokens(self):
+        with db.connect() as c:
+            c.execute("INSERT INTO ai_query_log (ts, question, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)"
+                      " VALUES (datetime('now','localtime','-1 hours'), 'câu hỏi cũ', 'opus', 6, 100, 10, 20, 0.25)")
+            c.execute("INSERT INTO ai_usage_log (kind, label, model, input_tokens, output_tokens, cost_usd) VALUES ('memory', 'ghi chú', 'm', 10, 5, 0.01)")
+            c.execute("INSERT INTO ai_query_log (question, cost_usd) VALUES ('chưa có model', 9)")  # câu lỗi/Gemini không ghi model thì bỏ qua
+            rep = budget.report(c, 7)
+        self.assertEqual([r["label"] for r in rep["recent"]], ["ghi chú", "câu hỏi cũ"])
+        chat = rep["recent"][1]
+        self.assertEqual((chat["kind"], chat["input_tokens"], chat["output_tokens"], chat["cost_usd"]), ("chat", 36, 100, 0.25))
+
     def test_report_all_time_total_ignores_the_day_window(self):
         with db.connect() as c:
             c.execute("INSERT INTO ai_usage_log (kind, model, input_tokens, output_tokens, cost_usd, ts)"

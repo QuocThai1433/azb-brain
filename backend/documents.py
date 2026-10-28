@@ -1,6 +1,6 @@
 """Kho tài liệu: lưu file gốc, trích xuất văn bản, chia đoạn và đánh chỉ mục tìm kiếm.
 
-Hỗ trợ: PDF (có lớp chữ), PDF scan (đọc bằng Claude), DOCX, XLSX/XLS, TXT/MD, âm thanh (gỡ băng bằng Gemini).
+Hỗ trợ: PDF (có lớp chữ), PDF scan (đọc bằng Claude, hoặc Gemini nếu AZB_OCR_ENGINE=gemini), DOCX, XLSX/XLS, TXT/MD, âm thanh (gỡ băng bằng Gemini).
 """
 import hashlib
 import math
@@ -234,7 +234,94 @@ def render_html(path: Path, title: str, fallback_text: str | None = None) -> str
             f"<header><h1>{_esc(title)}</h1><nav>{nav}</nav></header><main>{body}</main></body></html>")
 
 
+def _ocr_engine() -> str:
+    """Engine đọc scan: 'claude' (mặc định) hoặc 'gemini' (AZB_OCR_ENGINE=gemini). Giá trị lạ coi như claude."""
+    return "gemini" if os.environ.get("AZB_OCR_ENGINE", "").strip().lower() == "gemini" else "claude"
+
+
+def _ocr_fallback() -> bool:
+    """AZB_OCR_FALLBACK=1: Gemini lỗi thì đọc lại bằng Claude (tốn thêm tiền, nội dung file gửi tiếp sang Anthropic). Mặc định tắt."""
+    return os.environ.get("AZB_OCR_FALLBACK", "").strip() == "1"
+
+
+def _gemini_read(data: bytes, mime: str, prompt: str) -> tuple[str, int, int, str]:
+    """Một lần gọi Gemini đọc scan. Trả về (văn bản, token vào, token ra, lý do dừng)."""
+    import time
+
+    from google.genai import errors, types
+
+    from .ai import gemini_client, gemini_ocr_model, has_gemini
+
+    if not has_gemini():
+        raise RuntimeError("Đọc scan bằng Gemini – cần khoá Gemini API (GEMINI_API_KEY).")
+    gemini = gemini_client(timeout_s=600)
+    for attempt in range(3):  # model hay báo 503 "quá tải" tạm thời
+        try:
+            msg = gemini.models.generate_content(
+                model=gemini_ocr_model(),
+                contents=[types.Part.from_bytes(data=data, mime_type=mime), prompt],
+                config=types.GenerateContentConfig(
+                    max_output_tokens=64000,
+                    thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)),
+            )
+            break
+        except errors.ServerError:
+            if attempt == 2:
+                raise
+            time.sleep(10 * (attempt + 1))
+    reason = msg.candidates[0].finish_reason.name if msg.candidates and msg.candidates[0].finish_reason else ""
+    if (msg.prompt_feedback and msg.prompt_feedback.block_reason) or reason in ("SAFETY", "PROHIBITED_CONTENT"):
+        raise RuntimeError("Mô hình từ chối đọc nội dung này.")
+    um = msg.usage_metadata
+    tok_in = getattr(um, "prompt_token_count", 0) or 0
+    tok_out = (getattr(um, "candidates_token_count", 0) or 0) + (getattr(um, "thoughts_token_count", 0) or 0)
+    return msg.text or "", tok_in, tok_out, reason
+
+
+def _log_gemini_cost(kind: str, tok_in: int, tok_out: int, label: str) -> None:
+    from .ai import gemini_ocr_model, gemini_price, log_cost
+
+    p_in, p_out = gemini_price()
+    log_cost(kind, gemini_ocr_model(), tok_in, tok_out, (tok_in * p_in + tok_out * p_out) / 1_000_000, label)
+
+
 def _ocr_pdf_with_ai(path: Path) -> tuple[list[str], str]:
+    """Đọc PDF scan bằng engine đang chọn (AZB_OCR_ENGINE). Trả về (danh sách văn bản theo cụm, ghi chú)."""
+    if _ocr_engine() != "gemini":
+        return _ocr_pdf_with_claude(path)
+    try:
+        parts, note = _ocr_pdf_with_gemini(path)
+        return parts, (note + " Đọc bằng Gemini.").strip()
+    except Exception:
+        if not _ocr_fallback():
+            raise
+        parts, note = _ocr_pdf_with_claude(path)
+        return parts, (note + " Gemini lỗi nên đã đọc lại bằng Claude.").strip()
+
+
+def _ocr_pdf_with_gemini(path: Path) -> tuple[list[str], str]:
+    """Đọc PDF scan bằng Gemini theo từng cụm trang, ghi chi phí vào nhật ký. Trả về (văn bản theo cụm, ghi chú)."""
+    import pymupdf
+
+    out, notes = [], []
+    with pymupdf.open(path) as src:
+        total = len(src)
+        for start in range(0, total, OCR_PAGES_PER_CALL):
+            end = min(start + OCR_PAGES_PER_CALL, total) - 1
+            part = pymupdf.open()
+            part.insert_pdf(src, from_page=start, to_page=end)
+            data = part.tobytes()
+            part.close()
+            text, tok_in, tok_out, reason = _gemini_read(
+                data, "application/pdf", OCR_PDF_PROMPT + f" Cụm này bắt đầu từ trang {start + 1}.")
+            _log_gemini_cost("ocr_pdf", tok_in, tok_out, f"{path.name} (trang {start + 1}-{end + 1})")
+            if reason == "MAX_TOKENS":
+                notes.append(f"Trang {start + 1}-{end + 1} có thể bị thiếu nội dung cuối.")
+            out.append(text)
+    return out, " ".join(notes)
+
+
+def _ocr_pdf_with_claude(path: Path) -> tuple[list[str], str]:
     """Đọc PDF scan bằng Claude theo từng cụm trang. Trả về (danh sách văn bản theo cụm, ghi chú)."""
     import base64
 
@@ -328,8 +415,30 @@ def _transcribe_audio(path: Path) -> tuple[str, str]:
 IMAGE_INLINE_MAX = 5 * 1024 * 1024  # Claude nhận ảnh tối đa 5 MB mỗi ảnh
 
 
+OCR_IMAGE_PROMPT = (
+    "Đọc bức ảnh này cho một trợ lý doanh nghiệp (tiếng Việt). (1) Chép lại nguyên văn mọi chữ nhìn thấy, giữ đúng dấu, "
+    "bảng thì dựng lại dạng bảng Markdown, giữ nguyên số liệu. (2) Sau đó mô tả ngắn gọn phần không phải chữ "
+    "(biểu đồ, sơ đồ, hình, giao diện phần mềm) và nêu số liệu/ý chính thấy được. Chữ mờ không đọc được ghi [không rõ]. "
+    "Chỉ nêu những gì có trong ảnh, không suy đoán thêm."
+)
+
+
 def _read_image(path: Path) -> str:
-    """Đọc ảnh (ảnh chụp màn hình, biểu đồ, giấy tờ, bảng) bằng Claude: chép chữ + mô tả những gì thấy."""
+    """Đọc ảnh (ảnh chụp màn hình, biểu đồ, giấy tờ, bảng) bằng engine đang chọn (AZB_OCR_ENGINE)."""
+    if _ocr_engine() != "gemini":
+        return _read_image_with_claude(path)
+    try:
+        text, tok_in, tok_out, _ = _gemini_read(path.read_bytes(), IMAGE_MIME[path.suffix.lower()], OCR_IMAGE_PROMPT)
+        _log_gemini_cost("ocr_image", tok_in, tok_out, path.name)
+        return text
+    except Exception:
+        if not _ocr_fallback():
+            raise
+        return _read_image_with_claude(path)
+
+
+def _read_image_with_claude(path: Path) -> str:
+    """Đọc ảnh bằng Claude: chép chữ + mô tả những gì thấy."""
     import base64
 
     from .ai import ANTHROPIC_MODEL, client, has_anthropic, log_usage, message_text
@@ -338,12 +447,7 @@ def _read_image(path: Path) -> str:
         raise RuntimeError("File ảnh – cần khoá Anthropic API để đọc nội dung ảnh.")
     if path.stat().st_size > IMAGE_INLINE_MAX:
         raise RuntimeError("Ảnh quá lớn (trên 5 MB) – hãy giảm kích thước rồi tải lại.")
-    prompt = (
-        "Đọc bức ảnh này cho một trợ lý doanh nghiệp (tiếng Việt). (1) Chép lại nguyên văn mọi chữ nhìn thấy, giữ đúng dấu, "
-        "bảng thì dựng lại dạng bảng Markdown, giữ nguyên số liệu. (2) Sau đó mô tả ngắn gọn phần không phải chữ "
-        "(biểu đồ, sơ đồ, hình, giao diện phần mềm) và nêu số liệu/ý chính thấy được. Chữ mờ không đọc được ghi [không rõ]. "
-        "Chỉ nêu những gì có trong ảnh, không suy đoán thêm."
-    )
+    prompt = OCR_IMAGE_PROMPT
     data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
     msg = client(timeout_s=300).messages.create(
         model=ANTHROPIC_MODEL, max_tokens=16000, output_config={"effort": "low"},

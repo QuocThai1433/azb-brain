@@ -3,13 +3,19 @@
 const $ = (sel, el = document) => el.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtNum = (n) => (n == null ? "—" : Number(n).toLocaleString("vi-VN"));
+// "2026-10-22" -> "22/10/2026"; "2026-10-22 14:30:00" -> "22/10/2026 14:30"
+const fmtDay = (s, short) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}:\d{2}))?/.exec(s || "");
+  if (!m) return s || "";
+  return short ? `${m[3]}/${m[2]}` : `${m[3]}/${m[2]}/${m[1]}${m[4] ? " " + m[4] : ""}`;
+};
 
 const UNIT_TYPES = { board: "HĐQT", executive: "Ban điều hành", division: "Khối", department: "Phòng/Ban", committee: "Ban chuyên trách", project: "Dự án" };
 const COLOR_GROUPS = { exec: "Điều hành", hr: "Nhân sự - Hành chính", ops: "Vận hành", finance: "Tài chính", technical: "Kinh tế - Kỹ thuật", construction: "Thi công / Xây lắp", commercial: "Thương mại" };
 const METRICS = { doanh_so: "Doanh số", doanh_thu: "Doanh thu", loi_nhuan: "Lợi nhuận", dong_tien: "Dòng tiền", okr_du_an: "OKRs dự án", khac: "Chỉ tiêu khác" };
 const PROCESS_STATUS = { draft: "Nháp", active: "Đang áp dụng", retired: "Hết hiệu lực" };
-const PROPOSAL_STATUS = { new: "Mới", approved: "Đã duyệt", in_progress: "Đang thực hiện", review: "Chờ nghiệm thu", done: "Hoàn thành", dropped: "Không thực hiện" };
-const PROPOSAL_CLASS = { new: "brand", approved: "ok", in_progress: "warn", review: "brand", done: "ok", dropped: "" };
+const PROPOSAL_STATUS = { new: "Mới", in_progress: "Đang thực hiện", review: "Chờ nghiệm thu", done: "Hoàn thành", dropped: "Không thực hiện" };
+const PROPOSAL_CLASS = { new: "brand", in_progress: "warn", review: "brand", done: "ok", dropped: "" };
 const TITLES = [["CT", "Chủ tịch HĐQT"], ["TGĐ", "Tổng Giám đốc"], ["PTGĐ", "Phó Tổng Giám đốc"], ["GĐK", "Giám đốc Khối"], ["GĐ", "Giám đốc"],
   ["TB", "Trưởng ban"], ["PB", "Phó ban"], ["PT", "Phụ trách điều hành"], ["TP", "Trưởng phòng"], ["PP", "Phó phòng"], ["TBP", "Trưởng bộ phận"], ["NV", "Nhân viên"]];
 const color = (g) => `var(--g-${g || "exec"})`;
@@ -52,6 +58,13 @@ const ICONS = {
   reset: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
   left: '<path d="M15 6l-6 6 6 6"/>',
   right: '<path d="m9 6 6 6-6 6"/>',
+  wallet: '<path d="M3 7a2 2 0 0 1 2-2h13v4"/><path d="M3 7v11a2 2 0 0 0 2 2h14a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H5a2 2 0 0 1-2-2"/><path d="M16 14h2"/>',
+  bulb: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
+  folder: '<path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  coin: '<circle cx="12" cy="12" r="9"/><path d="M14.5 9.5c-.5-.9-1.4-1.3-2.5-1.3-1.5 0-2.5.8-2.5 1.9 0 2.6 5 1.4 5 3.9 0 1.1-1.1 1.9-2.5 1.9-1.1 0-2.1-.5-2.5-1.4M12 6.5v1.7M12 15.8v1.7"/>',
+  idcard: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="2"/><path d="M6 16a3 3 0 0 1 6 0M14 10h4M14 14h4"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
 };
 const icon = (name) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ""}</svg>`;
@@ -125,13 +138,16 @@ hydrateIcons();
 // Số đếm tăng dần khi trang hiện ra
 function countUp(root) {
   root.querySelectorAll("[data-count]").forEach((el) => {
+    if (el.closest(".rv:not(.in)")) return;  // khối chưa cuộn tới: đợi lúc hiện ra mới đếm
     const to = Number(el.dataset.count) || 0;
     const suffix = el.dataset.suffix || "";
-    if (matchMedia("(prefers-reduced-motion: reduce)").matches || to === 0) return (el.textContent = fmtNum(to) + suffix);
+    const dec = Number(el.dataset.dec) || 0;  // số chữ số thập phân (VD 68,5%)
+    const show = (v) => (dec ? v.toLocaleString("vi-VN", { minimumFractionDigits: dec, maximumFractionDigits: dec }) : fmtNum(Math.round(v))) + suffix;
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches || to === 0) return (el.textContent = show(to));
     const t0 = performance.now(), dur = 1100;
     const step = (t) => {
       const p = Math.min(1, (t - t0) / dur);
-      el.textContent = fmtNum(Math.round(to * (1 - Math.pow(1 - p, 3)))) + suffix;
+      el.textContent = show(to * (1 - Math.pow(1 - p, 3)));
       if (p < 1) requestAnimationFrame(step);
     };
     requestAnimationFrame(step);
@@ -182,18 +198,26 @@ async function refreshPending() {
     const st = await api("/api/auth/state");
     const prev = state.user.profile_notices || 0;
     Object.assign(state.user, { pending_requests: st.user?.pending_requests || 0, pending_links: st.user?.pending_links || 0,
-      pending_accounts: st.user?.pending_accounts || 0, profile_notices: st.user?.profile_notices || 0 });
+      pending_accounts: st.user?.pending_accounts || 0, profile_notices: st.user?.profile_notices || 0, proposals_pending: st.user?.proposals_pending || 0, proposals_stale: st.user?.proposals_stale || 0 });
     setBadges(state.user);
     // có kết quả duyệt mới trong lúc đang dùng app: báo ngay thay vì đợi user tự mở trang
     if (state.user.profile_notices > prev && state.view !== "profile") toast("Quản trị viên vừa xử lý yêu cầu của bạn. Xem ở mục Hồ sơ của tôi.");
   } catch {}
 }
+// admin: pending_requests là đơn xin quyền chờ duyệt (gộp vào mục Người dùng & quyền); người khác: số đơn của mình vừa được xử lý (hiện ở menu avatar)
 function setBadges(u) {
-  for (const [id, n] of [["access-badge", u.pending_requests], ["users-badge", (u.pending_links || 0) + (u.pending_accounts || 0)], ["profile-badge", u.profile_notices]]) {
-    const b = $("#" + id);
+  const admin = u.role === "admin", mine = admin ? 0 : u.pending_requests || 0;
+  const system = (u.pending_links || 0) + (u.pending_accounts || 0) + (admin ? u.pending_requests || 0 : 0);
+  for (const [id, n] of [["users-badge", system], ["access-badge", mine], ["profile-badge", u.profile_notices], ["proposals-badge", u.proposals_pending]]) {
+    const b = document.getElementById(id);
+    if (!b) continue;
     b.textContent = n || "";
     b.hidden = !n;
   }
+  const pb = document.getElementById("proposals-badge");
+  if (pb) pb.title = u.proposals_stale ? `${u.proposals_stale} đề xuất chờ nghiệm thu quá lâu` : "";
+  const dot = document.getElementById("av-dot");
+  if (dot) dot.hidden = !((u.profile_notices || 0) + mine);
 }
 setInterval(() => { if (!document.hidden) refreshPending(); }, 30000);
 
@@ -205,21 +229,29 @@ async function boot() {
   document.body.classList.toggle("logged-out", !st.user);
   if (!st.user) return renderLogin(st.needs_setup);
   const u = st.user;
-  const show = { chat: u.can_use_ai, myfiles: u.can_use_ai, memory: u.can_use_ai, insights: can("insights"), users: ["admin", "ceo"].includes(u.role), access: u.role !== "ceo", docs: can("docs_view"), history: ["admin", "ceo"].includes(u.role), budget: ["admin", "ceo"].includes(u.role), aicost: ["admin", "ceo"].includes(u.role), proposals: u.can_use_ai || u.proposals_assigned > 0 };
-  document.querySelectorAll("#nav button").forEach((b) => (b.hidden = show[b.dataset.view] === false));
+  const show = { chat: u.can_use_ai, myfiles: u.can_use_ai, insights: can("insights"), users: ["admin", "ceo"].includes(u.role), access: u.role !== "ceo", docs: can("docs_view"), history: ["admin", "ceo"].includes(u.role), budget: ["admin", "ceo"].includes(u.role), aicost: ["admin", "ceo"].includes(u.role), proposals: true };
+  state.show = show;
+  document.querySelectorAll("#nav a[data-view]").forEach((b) => (b.hidden = show[b.dataset.view] === false));
   document.querySelectorAll("#nav .nav-group").forEach((g) => {  // ẩn tiêu đề nhóm nếu không còn mục nào
     let n = g.nextElementSibling, any = false;
-    while (n && !n.classList.contains("nav-group")) { if (n.tagName === "BUTTON" && !n.hidden) any = true; n = n.nextElementSibling; }
+    while (n && !n.classList.contains("nav-group")) { if (n.dataset.view && !n.hidden) any = true; n = n.nextElementSibling; }
     g.hidden = !any;
   });
-  setBadges(u);
   const display = u.full_name || u.username;
   const initials = display.trim().split(/\s+/).slice(-2).map((w) => w[0]).join("").toUpperCase();
+  const menuLink = (view, ico, label, badgeId) => `<a href="${VIEW_SLUG[view]}" data-view="${view}" role="menuitem">${icon(ico)}<span>${label}</span>${badgeId ? `<em class="nav-count" id="${badgeId}" hidden></em>` : ""}</a>`;
   $("#userbox").innerHTML = `
-    <div class="u-card"><span class="avatar">${esc(initials)}</span>
-      <span class="u-meta"><b>${esc(display)}</b><small>${esc(st.roles[u.role])}</small></span></div>
-    <button class="icon-btn" id="pw-btn" title="Đổi mật khẩu">${icon("key")}</button>
+    <button type="button" class="u-card" id="u-menu-btn" aria-haspopup="menu" aria-expanded="false" title="Hồ sơ, dữ liệu riêng, đổi mật khẩu">
+      <span class="avatar">${esc(initials)}<i class="av-dot" id="av-dot" hidden></i></span>
+      <span class="u-meta"><b>${esc(display)}</b><small>${esc(st.roles[u.role])}</small></span>${icon("chev")}</button>
+    <div class="u-menu" id="u-menu" role="menu" hidden>
+      ${menuLink("profile", "user", "Hồ sơ của tôi", "profile-badge")}
+      ${u.can_use_ai ? menuLink("myfiles", "folder", "Dữ liệu của tôi") : ""}
+      ${["admin", "ceo"].includes(u.role) ? "" : menuLink("access", "key", "Quyền truy cập", "access-badge")}
+      <button type="button" id="pw-btn" role="menuitem">${icon("key")}<span>Đổi mật khẩu</span></button>
+    </div>
     <button class="icon-btn" id="logout-btn" title="Đăng xuất">${icon("logout")}</button>`;
+  setBadges(u);
   $("#logout-btn").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); state.chatId = null; state.chatJob = null; state.jobs.clear(); state.unseen.clear(); boot(); };
   $("#pw-btn").onclick = () => openForm("Đổi mật khẩu", [
     { name: "old_password", label: "Mật khẩu hiện tại", type: "password", required: true },
@@ -374,29 +406,58 @@ function renderLogin(needsSetup, registering = false) {
 }
 
 // ---------------- Điều hướng ----------------
-document.getElementById("nav").addEventListener("click", (e) => {
-  const v = e.target.closest("button")?.dataset.view;
-  if (v) go(v);
+document.addEventListener("click", (e) => {
+  const menu = document.getElementById("u-menu");  // menu avatar: bấm vào avatar thì đóng/mở, bấm chỗ khác thì đóng
+  if (menu) {
+    const open = e.target.closest("#u-menu-btn") ? menu.hidden : false;
+    menu.hidden = !open;
+    document.getElementById("u-menu-btn").setAttribute("aria-expanded", String(open));
+  }
+  if (e.button || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;  // Ctrl/giữa chuột: để trình duyệt mở tab mới
+  const v = e.target.closest("#nav a[data-view], #userbox a[data-view]")?.dataset.view;
+  if (!v) return;
+  e.preventDefault();
+  go(v, v === "profile" ? { profileTab: "info" } : {});
+});
+addEventListener("keydown", (e) => {
+  const menu = document.getElementById("u-menu");
+  if (e.key === "Escape" && menu && !menu.hidden) { menu.hidden = true; document.getElementById("u-menu-btn").setAttribute("aria-expanded", "false"); document.getElementById("u-menu-btn").focus(); }
 });
 $("#home-logo").onclick = () => go("overview");
 $("#menu-btn").onclick =() => document.body.classList.toggle("nav-open");
 $("#scrim").onclick = () => document.body.classList.remove("nav-open");
 addEventListener("scroll", () => document.body.classList.toggle("scrolled", scrollY > 4), { passive: true });
 const can = (feature) => !!state.user?.permissions?.includes(feature);
-const canSee = (view) => !document.querySelector(`#nav button[data-view="${view}"]`)?.hidden;
+const canSee = (view) => state.show?.[view] !== false;
+// Trang không có mục riêng trên thanh bên: gộp vào mục khác (tab) hoặc nằm trong menu avatar
+const NAV_OF = { access: "users", aicost: "history" };
+const VIEW_TITLE = { users: "Tài khoản", access: "Quyền truy cập", history: "Lịch sử thay đổi", aicost: "Chi phí AI", myfiles: "Dữ liệu của tôi", profile: "Hồ sơ của tôi" };
+const SECTION_TABS = { users: [["users", "Tài khoản"], ["access", "Duyệt quyền"]], access: [["users", "Tài khoản"], ["access", "Duyệt quyền"]],
+  history: [["history", "Lịch sử thay đổi"], ["aicost", "Chi phí AI"]], aicost: [["history", "Lịch sử thay đổi"], ["aicost", "Chi phí AI"]] };
+function sectionTabs(main, view) {
+  const tabs = SECTION_TABS[view].filter(([v]) => canSee(v));
+  if (tabs.length < 2) return;
+  const u = state.user, n = { users: (u.pending_links || 0) + (u.pending_accounts || 0), access: u.role === "admin" ? u.pending_requests || 0 : 0 };
+  const bar = document.createElement("div");
+  bar.className = "tabs section-tabs";
+  bar.innerHTML = tabs.map(([v, label]) => `<button type="button" data-goto="${v}" class="${v === view ? "active" : ""}">${esc(label)}${n[v] ? ` <span class="badge warn">${n[v]}</span>` : ""}</button>`).join("");
+  bar.onclick = (e) => { const v = e.target.closest("[data-goto]")?.dataset.goto; if (v && v !== state.view) go(v); };
+  main.prepend(bar);
+}
 
 // Đường dẫn tiếng Việt: /phong-ban/<id>/<tab>, /nhan-su/<id>, /muc-tieu-doanh-thu/<id>...; trang chủ (Tổng quan) giữ nguyên "/".
 // Đổi trang thì ghi vào lịch sử để Back/F5/chia sẻ link hoạt động. Backend trả index.html cho các đường dẫn này (spa_fallback trong app.py).
 const VIEW_SLUG = { overview: "", chart: "so-do-to-chuc", units: "phong-ban", people: "nhan-su", targets: "muc-tieu-doanh-thu", budget: "ngan-sach", proposals: "de-xuat",
   docs: "tai-lieu", insights: "phan-tich", chat: "tro-ly-ai", myfiles: "du-lieu-cua-toi", profile: "ho-so-cua-toi", memory: "ai-nho-gi-ve-toi",
-  history: "lich-su-thay-doi", users: "tai-khoan", access: "quyen-truy-cap" };
-const TAB_SLUG = { org: "so-do", process: "quy-trinh", docs: "tai-lieu", target: "muc-tieu", info: "chuc-nang" };
+  history: "lich-su-thay-doi", aicost: "chi-phi-ai", users: "tai-khoan", access: "quyen-truy-cap" };
+const TAB_SLUG = { org: "so-do", docs: "tai-lieu", target: "muc-tieu", info: "chuc-nang" };
 const invert = (m) => Object.fromEntries([...Object.entries(m).map(([k, v]) => [v, k]), ...Object.keys(m).map((k) => [k, k])]);  // nhận cả tên tiếng Anh của link cũ
-const SLUG_VIEW = invert(VIEW_SLUG), SLUG_TAB = invert(TAB_SLUG);
+const SLUG_VIEW = invert(VIEW_SLUG), SLUG_TAB = { ...invert(TAB_SLUG), "quy-trinh": "docs" };  // liên kết cũ tới tab Quy trình mở tab gộp
 
 function buildPath(view, extra = {}) {
   const parts = [VIEW_SLUG[view]];
   if (view === "units" && state.unitId) parts.push(state.unitId, TAB_SLUG[state.unitTab]);
+  if (view === "profile" && state.profileTab === "memory") parts.push("ai-nho");
   if (view === "people" && extra.peopleFocus) parts.push(extra.peopleFocus);
   if (view === "targets" && extra.targetFocus) parts.push(extra.targetFocus);
   return "/" + parts.filter((p) => p !== "").join("/");
@@ -405,9 +466,11 @@ function parsePath() {
   // link cũ dạng /#/units/5/org vẫn mở được
   const src = location.hash.startsWith("#/") ? location.hash.slice(1) : location.pathname;
   const [slug, a, b] = src.replace(/^\/+/, "").split("/");
-  const view = slug ? SLUG_VIEW[slug] : "overview";
-  if (!view || !VIEWS[view] || !canSee(view)) return { view: "overview", extra: {} };
+  let view = slug ? SLUG_VIEW[slug] : "overview";
   const id = Number(a), extra = {};
+  if (view === "memory") { view = "profile"; extra.profileTab = "memory"; }  // link cũ /ai-nho-gi-ve-toi
+  else if (view === "profile") extra.profileTab = a === "ai-nho" ? "memory" : "info";
+  if (!view || !VIEWS[view] || !canSee(view)) return { view: "overview", extra: {} };
   if (view === "units") {
     if (id > 0) extra.unitId = id;
     if (SLUG_TAB[b]) extra.unitTab = SLUG_TAB[b];
@@ -437,11 +500,15 @@ function go(view, extra = {}, fromUrl = false) {
   syncPath(view, extra, fromUrl);
   document.body.classList.toggle("chat-mode", view === "chat");
   document.body.classList.remove("nav-open");
-  document.querySelectorAll("#nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
-  const btn = document.querySelector(`#nav button[data-view="${view}"] span`);
-  if (btn) {
-    $("#page-title").textContent = btn.textContent;
-    document.title = `${btn.textContent} · AZB Brain`;
+  document.querySelectorAll("#nav a[data-view], #userbox a[data-view]").forEach((b) => {
+    const on = b.dataset.view === (b.closest("#nav") ? NAV_OF[view] ?? view : view);
+    b.classList.toggle("active", on);
+    if (on) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
+  });
+  const title = VIEW_TITLE[view] || document.querySelector(`#nav a[data-view="${view}"] span`)?.textContent;
+  if (title) {
+    $("#page-title").textContent = title;
+    document.title = `${title} · AZB Brain`;
   }
   render(changed || !$("#main .card:not(.login)"));
 }
@@ -487,6 +554,12 @@ function ask({ title, message = "", input, okText = "Đồng ý", cancelText = "
     dlg.querySelector("form").onsubmit = () => { result = field ? field.value : true; };
     dlg.querySelector("[data-act=cancel]")?.addEventListener("click", () => dlg.close());
     dlg.addEventListener("close", () => { dlg.remove(); resolve(result); });
+    // Enter = đồng ý (trừ khi đang focus nút Huỷ, để nút đó tự xử lý)
+    dlg.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.isComposing || e.target.closest("[data-act=cancel]")) return;
+      e.preventDefault();
+      dlg.querySelector("form").requestSubmit();
+    });
     dlg.showModal();
     if (field) { field.focus(); field.select(); } else dlg.querySelector(".primary").focus();
   });
@@ -532,14 +605,14 @@ function toast(msg, type = "ok") {
 }
 
 // ---------------- Modal form ----------------
-// Năm chỉ tiêu trọng yếu nhập cùng lúc: mỗi chỉ tiêu một cặp "mục tiêu / thực hiện"; ô để trống thì bỏ qua.
-// Theo "Mục tiêu và chương trình hành động công ty": KRI 01 doanh số, KRI 02 doanh thu, KRI 03 chi phí/hiệu quả tài chính,
+// Năm chỉ tiêu nhập cùng lúc: mỗi chỉ tiêu một cặp "mục tiêu / thực hiện"; ô để trống thì bỏ qua.
+// Theo "Mục tiêu và chương trình hành động công ty": KRI 01 doanh số, KRI 02 doanh thu, KRI 03 tối ưu ngân sách (nhập ở "Chỉ tiêu khác", đơn vị %),
 // KRI 04 dòng tiền (thu hồi công nợ, thu tiền), KRI 05 OKRs dự án. Tiền nhập theo tỷ đồng, lưu theo VNĐ như dữ liệu cũ.
 const KEY_METRICS = ["doanh_so", "doanh_thu", "loi_nhuan", "dong_tien", "okr_du_an"];
 const KEY_METRIC_FORM = {
   doanh_so: { unit: "tỷ đồng", hint: "KRI 01" },
   doanh_thu: { unit: "tỷ đồng", hint: "KRI 02" },
-  loi_nhuan: { unit: "tỷ đồng", hint: "KRI 03" },
+  loi_nhuan: { unit: "tỷ đồng", hint: "ngoài bộ KRI 2026" },
   dong_tien: { unit: "%", hint: "KRI 04 – tỷ lệ thu hồi công nợ, thu tiền" },
   okr_du_an: { unit: "%", hint: "KRI 05 – tỷ lệ dự án đạt yêu cầu" },
 };
@@ -618,7 +691,15 @@ function openForm(title, fields, values = {}, onSave, okLabel = "Lưu") {
       } else if (f.type === "check") {
         return `<label class="check${f.compact ? " compact" : ""}"><input type="checkbox" name="${f.name}" ${v ? "checked" : ""}><span>${esc(f.label)}</span></label>`;
       } else if (f.type === "file") {
-        input = `<input name="${f.name}" type="file" accept="${esc(f.accept || "")}" ${f.required ? "required" : ""}>`;
+        const exts = String(f.accept || "").split(",").map((x) => x.trim().replace(/^\./, "").toUpperCase()).filter(Boolean);
+        const hint = exts.length ? (exts.length > 6 ? exts.slice(0, 6).join(", ") + "…" : exts.join(", ")) : "";
+        input = `<div class="dropzone" data-drop="${f.name}">
+          <input name="${f.name}" type="file" accept="${esc(f.accept || "")}" ${f.required ? "required" : ""}>
+          <div class="dz-empty"><span class="dz-icon"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></span>
+            <b>Chọn tệp hoặc kéo thả vào đây</b>${hint ? `<small>Hỗ trợ: ${esc(hint)}</small>` : ""}</div>
+          <div class="dz-picked" hidden><span class="dz-icon ok"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 14l2 2 4-4"/></svg></span>
+            <div class="dz-meta"><b class="dz-name"></b><small class="dz-size"></small></div><span class="dz-change">Đổi tệp</span></div>
+        </div>`;
       } else {
         input = `<input name="${f.name}" type="${f.type || "text"}" value="${esc(v)}" placeholder="${esc(f.placeholder || "")}" ${f.required ? "required" : ""} step="any"${f.type === "password" ? ' autocomplete="new-password" readonly onfocus="this.readOnly=false"' : ""}>`;
       }
@@ -626,6 +707,24 @@ function openForm(title, fields, values = {}, onSave, okLabel = "Lưu") {
     })
     .join("");
   const form = $("#modal-form");
+  // Ô chọn file: input gốc phủ kín khung (bấm hoặc thả file đều nhận), JS chỉ đổi phần hiển thị tên và dung lượng
+  form.querySelectorAll(".dropzone").forEach((zone) => {
+    const inp = zone.querySelector("input[type=file]"), empty = zone.querySelector(".dz-empty"), picked = zone.querySelector(".dz-picked");
+    const draw = () => {
+      const file = inp.files[0];
+      zone.classList.toggle("has-file", !!file);
+      empty.hidden = !!file;
+      picked.hidden = !file;
+      if (file) {
+        picked.querySelector(".dz-name").textContent = file.name;
+        picked.querySelector(".dz-size").textContent = fmtSize(file.size) || "0 KB";
+      }
+    };
+    inp.onchange = draw;
+    ["dragenter", "dragover"].forEach((ev) => inp.addEventListener(ev, () => zone.classList.add("drag")));
+    ["dragleave", "drop"].forEach((ev) => inp.addEventListener(ev, () => zone.classList.remove("drag")));
+    draw();
+  });
   // Ô lọc cho select dài (field.search): gõ không dấu cũng khớp; giữ lại mục đang chọn và dòng đầu ("— Chọn —")
   const plain = (s) => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D").toLowerCase();
   fields.filter((f) => f.type === "select" && f.search).forEach((f) => {
@@ -757,9 +856,182 @@ async function confirmDelete(table, id, label, after) {
   render();
 }
 
+// Tổng quan điều hành cho Ban TGĐ: việc cần quyết định trước, rồi chỉ số điều hành, nhân sự, ngân sách
+let ovRefreshed = false;  // vừa bấm nút làm mới: dòng giờ cập nhật nháy sáng một lần
+
+// Khối nằm dưới màn hình chỉ chạy hiệu ứng (hiện lên, đếm số, thanh tiến độ) khi cuộn tới
+function revealOnScroll(main) {
+  main._rvObs?.disconnect();
+  const targets = [...main.children].filter((el) => el.matches(".ex-kpis, .ex-grid, .ex-health"));
+  if (!targets.length || !("IntersectionObserver" in window) || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const show = (el) => {
+    el.classList.add("in");
+    countUp(el);
+    requestAnimationFrame(() => requestAnimationFrame(() => el.querySelectorAll("[data-w]").forEach((b) => (b.style.width = b.dataset.w + "%"))));
+  };
+  const hide = (el) => {  // ra khỏi màn hình hẳn thì đặt lại, lần cuộn tới sau sẽ chạy lại hiệu ứng
+    el.classList.remove("in");
+    el.querySelectorAll("[data-w]").forEach((b) => (b.style.width = "0"));
+  };
+  const obs = main._rvObs = new IntersectionObserver((list) => list.forEach((en) => {
+    const el = en.target;
+    if (en.intersectionRatio >= 0.15 && !el.classList.contains("in")) show(el);
+    else if (!en.isIntersecting && el.classList.contains("in")) hide(el);
+  }), { threshold: [0, 0.15] });
+  targets.forEach((el) => { el.classList.add("rv"); obs.observe(el); });
+}
+
+async function execOverview(main, force = false) {
+  const fresh = force || !main.querySelector(".ex-top");  // lần mở đầu hoặc bấm làm mới: có hiệu ứng; vẽ lại ngầm thì không
+  const justRefreshed = ovRefreshed; ovRefreshed = false;
+  if (!main.querySelector(".ex-top")) main.innerHTML = `<div class="skel-wrap"><div class="skel" style="height:70px"></div>
+    <div class="skel" style="height:240px"></div><div class="skel" style="height:300px"></div>
+    <div class="kpis ex-kpis" style="margin:0">${'<div class="skel" style="height:120px"></div>'.repeat(5)}</div></div>`;
+  const [ov, emps, ai] = await Promise.all([api("/api/overview/executive"), api("/api/employees"), api("/api/ai/status")]);
+  const { budget: b, okr, proposals: p, hr } = ov;
+  const active = emps.filter((e) => e.status !== "inactive");
+  const byDiv = {};
+  active.forEach((e) => (byDiv[e.hr_division || "Chưa phân khối"] = (byDiv[e.hr_division || "Chưa phân khối"] || 0) + 1));
+  const divs = Object.entries(byDiv).sort((a, c) => c[1] - a[1]);
+  const maxDiv = Math.max(1, ...divs.map(([, n]) => n));
+  const hour = new Date().getHours();
+  const hello = hour < 11 ? "Chào buổi sáng" : hour < 14 ? "Chào buổi trưa" : hour < 18 ? "Chào buổi chiều" : "Chào buổi tối";
+  const today = new Date().toLocaleDateString("vi-VN", { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" });
+  const now = new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+  const name = state.user.full_name || state.user.username;
+  const nav = (v, focus = "") => (canSee(v) ? `onclick="go('${v}'${focus ? `,{focus:'${focus}'}` : ""})" tabindex="0" role="link"` : "");
+  const tone = (pct) => (pct >= 80 ? "bad" : pct >= 70 ? "warn" : "");
+  const SIGN = { red: "!", amb: "•", grn: "✓" };
+  // Số trong ô chỉ số: ghi sẵn giá trị cuối, hàm countUp (nếu chạy) sẽ đếm từ 0 lên
+  const num = (n, suffix = "") => `<span data-count="${n}" data-dec="${Number.isInteger(n) ? 0 : 1}" data-suffix="${suffix}">${fmtNum(n)}${suffix}</span>`;
+
+  const brief = ov.brief.map((x) => `
+    <li ${nav(x.view)}><i class="${x.level}">${SIGN[x.level]}</i><div>${esc(x.text)}<small>${esc(x.sub)}</small></div></li>`).join("");
+  const attention = ov.attention.length ? ov.attention.map((a) => `
+    <div class="ex-row ${a.level}" ${nav(a.view, a.focus)}>
+      <div class="t"><b>${esc(a.title)}</b><span>${esc(a.desc)}</span></div>
+      <span class="ex-tag ${a.level}">${a.level === "red" ? '<i class="ex-pulse"></i>' : ""}${esc(a.tag)}</span><span class="go">›</span></div>`).join("")
+    : '<div class="empty">Không có việc nào cần quyết định lúc này.</div>';
+
+  const kpi = (label, big, delta, view, extra = "") => `
+    <div class="card ex-kpi" ${nav(view)}><div class="l">${label}</div><div class="v">${big}</div>${delta}${extra}</div>`;
+  const noData = (view, text) => `<div class="ex-empty">${text}${canSee(view) ? ` <a href="#" onclick="event.stopPropagation(); go('${view}'); return false">Nhập thêm</a>` : ""}</div>`;
+  const kBudget = b.has_plan
+    ? kpi(`Ngân sách đã chi <span>${b.year}</span>`, `${num(b.percent)}<small>%</small>`,
+        `<div class="ex-delta ${b.percent > b.expected_pct + 5 ? "down" : "flat"}">Tiến độ thời gian ${b.expected_pct}%</div>`, "budget",
+        `<div class="ex-bar"><i class="${tone(b.percent)}" data-w="${Math.min(100, b.percent)}"></i></div>`)
+    : kpi("Ngân sách đã chi", "—", noData("budget", "Chưa có kế hoạch ngân sách."), "budget");
+  const kOkr = okr.total && okr.avg_pct != null
+    ? kpi(`Tiến độ mục tiêu <span>${esc(okr.period)}</span>`, `${num(okr.avg_pct)}<small>%</small>`,
+        `<div class="ex-delta ${okr.behind ? "down" : "flat"}">${okr.with_data}/${okr.total} mục có số đo${okr.behind ? ` · ${okr.behind} chậm` : ""}</div>`, "targets",
+        `<div class="ex-bar"><i data-w="${Math.min(100, okr.avg_pct)}"></i></div>`)
+    : kpi("Tiến độ mục tiêu", "—", noData("targets", okr.total ? `${okr.total} mục tiêu chưa có số thực hiện.` : "Chưa có mục tiêu."), "targets");
+  const kProp = kpi("Đề xuất chờ xử lý", num(p.new + p.review),
+    `<div class="ex-delta ${p.stale_review ? "down" : "flat"}">${p.new} chờ duyệt · ${p.review} chờ nghiệm thu</div>`, "proposals");
+  const kLate = kpi("Việc giao quá hạn", num(p.overdue),
+    `<div class="ex-delta ${p.overdue ? "down" : "up"}">${p.overdue ? "Cần nhắc người phụ trách" : "Không có việc quá hạn"}</div>`, "proposals");
+  const kHr = kpi("Nhân sự đang làm việc", num(active.length),
+    `<div class="ex-delta flat">${hr.joined_month} người vào trong tháng · ${hr.vacancies} vị trí trống</div>`, "people");
+
+  const budgetCard = b.has_plan ? `
+    <section class="card"><h3 class="ex-h">Ngân sách ${b.year} theo nhóm<span>Đã chi so với kế hoạch · đến tháng ${b.as_of}</span></h3>
+      <div class="ex-bud">${b.sections.map((s) => `
+        <div><div class="h"><span>${esc(s.name)}</span><b class="${tone(s.percent)}">${s.percent}%</b></div>
+          <div class="ex-bar"><i class="${tone(s.percent)}" data-w="${Math.min(100, s.percent)}"></i></div></div>`).join("")}</div>
+      <div class="ex-note">Cam từ 70%, đỏ từ 80%. ${canSee("budget") ? `<a href="#" onclick="go('budget'); return false">Xem chi tiết ›</a>` : ""}</div></section>`
+    : `<section class="card"><h3 class="ex-h">Ngân sách<span>Chưa có kế hoạch</span></h3>${noData("budget", "Nhập kế hoạch ngân sách để theo dõi chi tiêu.")}</section>`;
+
+  main.innerHTML = `
+    <div class="ex-top">
+      <div class="ex-hello"><h1>${hello}, <em>${esc(name)}</em></h1><p>${esc(today.charAt(0).toUpperCase() + today.slice(1))} · <span class="ex-upd${justRefreshed ? " just" : ""}">${justRefreshed ? "Vừa cập nhật" : "Cập nhật"} lúc ${now}</span>
+        <button type="button" class="ex-refresh" id="ex-refresh" title="Làm mới số liệu" aria-label="Làm mới số liệu"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/></svg></button></p></div>
+      ${canSee("chat") ? `<form class="ex-ask" id="ex-ask"><span>${icon("spark")}</span>
+        <input id="ex-q" maxlength="500" placeholder="${ai.configured ? "Hỏi trợ lý AI: “Khối nào đang chi vượt ngân sách?”" : "Trợ lý AI chưa cấu hình"}" aria-label="Hỏi trợ lý AI" ${ai.configured ? "" : "disabled"}>
+        <button type="submit" ${ai.configured ? "" : "disabled"}>Hỏi</button></form>` : ""}
+    </div>
+    <section class="card ex-brief"><h3 class="ex-h">Tóm tắt hôm nay<span>Tính tự động từ ngân sách, mục tiêu, đề xuất và nhân sự. Bấm để xem chi tiết</span></h3><ul>${brief}</ul></section>
+    <section class="card ex-todo"><h3 class="ex-h">Cần quyết định / chú ý
+      ${ov.attention.length ? `<em class="ex-tag ${ov.attention[0].level}">${ov.attention.length} mục</em>` : ""}<span>Sắp theo mức độ khẩn. Bấm vào dòng để xử lý ngay</span></h3>
+      <div class="ex-list">${attention}</div>
+      ${p.queue.length ? `<div class="ex-queue"><h4>Xử lý nhanh<span>${p.new + p.review > p.queue.length ? `Hiện ${p.queue.length}/${p.new + p.review} đề xuất, xử lý xong sẽ hiện tiếp` : "Đề xuất đang chờ anh duyệt hoặc nghiệm thu"}</span></h4>
+        ${p.queue.map((q) => `<div class="ex-q" data-q="${q.id}">
+          <div class="t"><button type="button" class="link" data-open="${q.id}">${esc(q.title)}</button>
+            <span>${q.status === "review" ? `Chờ nghiệm thu${q.review_days != null ? ` · ${q.review_days} ngày` : ""}${q.owner_name ? ` · ${esc(q.owner_name)} thực hiện` : ""}` : "Chờ duyệt · chưa giao người phụ trách"}</span></div>
+          <div class="acts">${q.status === "review"
+            ? '<button type="button" class="ex-btn" data-act="return">Trả lại</button><button type="button" class="ex-btn main" data-act="accept">Nghiệm thu</button>'
+            : '<button type="button" class="ex-btn" data-act="drop">Từ chối</button><button type="button" class="ex-btn main" data-act="approve">Duyệt và giao</button>'}</div></div>`).join("")}</div>` : ""}
+    </section>
+    <div class="kpis ex-kpis">${kBudget}${kOkr}${kProp}${kLate}${kHr}</div>
+    <div class="ov-grid ex-grid">
+      <section class="card"><h3 class="ex-h">Nhân sự theo khối<span>Người đang làm việc · tổng ${fmtNum(active.length)} người</span></h3>
+        ${divs.length ? `<div class="hbars">${divs.map(([d, n]) => `
+          <div class="hbar"><span class="nm" title="${esc(d)}">${esc(d)}</span><span class="track"><span class="fill" data-w="${(n / maxDiv) * 100}"></span></span><b class="v">${fmtNum(n)}</b></div>`).join("")}</div>`
+          : '<div class="empty">Chưa có danh sách nhân sự.</div>'}
+        <div class="ex-mini"><div><b>${hr.joined_month}</b><span>Vào làm trong tháng</span></div><div><b>${hr.vacancies}</b><span>Vị trí đang trống</span></div><div><b>${hr.concurrent}</b><span>Người kiêm nhiệm</span></div></div>
+      </section>
+      ${budgetCard}
+    </div>
+    ${canSee("insights") && hr.unverified ? `<div class="card ex-health" ${nav("insights")}><span class="dotc b">${icon("info")}</span>
+      <div><b>${hr.unverified} mục dữ liệu cần xác nhận</b><span>Tên đơn vị / họ tên nhân sự. Trợ lý AI chính xác hơn khi dữ liệu được xác nhận.</span></div><span class="go">Xử lý ›</span></div>` : ""}`;
+
+  const form = $("#ex-ask");
+  if (form) form.onsubmit = (e) => { e.preventDefault(); state.chatSeed = $("#ex-q").value.trim() || null; go("chat"); };  // có câu hỏi thì sang Chat và gửi luôn; để trống thì chỉ mở Chat
+  main.querySelectorAll('[role="link"]').forEach((el) => (el.onkeydown = (e) => { if (e.key === "Enter") el.click(); }));
+  // Xử lý nhanh đề xuất ngay trên trang; quy tắc chuyển trạng thái vẫn do máy chủ kiểm tra (backend/proposals.py)
+  const put = (id, body) => api(`/api/proposals/${id}`, { method: "PUT", body });
+  const reload = () => execOverview(main, true);
+  main.querySelectorAll("[data-q] [data-open]").forEach((b) => (b.onclick = () => go("proposals", { prop: { filter: "", open: b.dataset.open } })));
+  main.querySelectorAll("[data-q] [data-act]").forEach((b) => (b.onclick = async () => {
+    const q = p.queue.find((x) => x.id === Number(b.closest("[data-q]").dataset.q)), act = b.dataset.act;
+    try {
+      if (act === "accept") {
+        if (!(await ask({ title: "Nghiệm thu đề xuất?", message: q.title, okText: "Nghiệm thu" }))) return;
+        await put(q.id, { status: "done" });
+        toast("Đã nghiệm thu đề xuất");
+        return reload();
+      }
+      if (act === "return") {
+        return openForm("Trả lại để làm tiếp", [{ name: "note", label: "Yêu cầu bổ sung (không bắt buộc)", type: "textarea" }], {},
+          (d) => put(q.id, { status: "in_progress", status_note: d.note || "" }).then(reload), "Trả lại");
+      }
+      if (act === "drop") {
+        return openForm("Không thực hiện đề xuất", [{ name: "note", label: "Lý do không thực hiện (bắt buộc)", type: "textarea", required: true }], {},
+          (d) => put(q.id, { status: "dropped", status_note: d.note }).then(reload), "Xác nhận");
+      }
+      const meta = await api("/api/proposals/meta");  // approve: chọn người phụ trách, hạn và ưu tiên rồi chuyển sang Đang thực hiện
+      openForm("Duyệt và giao việc", [
+        { name: "owner_user_id", label: "Người phụ trách (bắt buộc)", type: "select", search: true, numeric: true,
+          options: [["", "— Chọn —"], ...meta.assignees.map((u) => [u.id, `${u.full_name || u.username} (${u.username})`])] },
+        { name: "due_date", label: "Hạn hoàn thành", type: "date", half: true },
+        { name: "priority", label: "Ưu tiên", type: "select", options: Object.entries(meta.priority), half: true },
+        { name: "note", label: "Ghi chú của Ban TGĐ", type: "textarea" },
+      ], { priority: q.priority || "normal", due_date: q.due_date >= new Date().toLocaleDateString("sv-SE") ? q.due_date : "" }, (d) => put(q.id, { owner_user_id: d.owner_user_id || null, due_date: d.due_date || "",
+        priority: d.priority, note: d.note || "", status: "in_progress" }).then(() => { toast("Đã duyệt và giao việc"); return reload(); }), "Duyệt");
+    } catch (e) { toast(e.message, "err"); }
+  }));
+  const refresh = $("#ex-refresh");
+  refresh.onclick = async () => {
+    refresh.disabled = true;
+    refresh.classList.add("spin");
+    try { ovRefreshed = true; await execOverview(main, true); } catch (e) { toast(e.message, "err"); refresh.disabled = false; refresh.classList.remove("spin"); }
+  };
+  main.querySelectorAll(".ex-brief ul, .ex-list, .ex-kpis").forEach((box) => [...box.children].forEach((el, i) => el.style.setProperty("--i", i)));  // thứ tự để hiện lần lượt
+  if (fresh) {
+    revealOnScroll(main);
+    countUp(main);
+    main.classList.remove("enter");  // các khối hiện lần lượt (dùng lại hiệu ứng chuyển trang của app, vì dữ liệu có thể về sau khi hiệu ứng đó đã tắt)
+    void main.offsetWidth;
+    main.classList.add("enter");
+    clearTimeout(main._enter);
+    main._enter = setTimeout(() => main.classList.remove("enter"), 900);
+  }
+  requestAnimationFrame(() => requestAnimationFrame(() => main.querySelectorAll("[data-w]").forEach((el) => { if (!el.closest(".rv:not(.in)")) el.style.width = el.dataset.w + "%"; })));
+}
+
 // ---------------- Views ----------------
 const VIEWS = {
   async overview(main) {
+    if (state.user.edit_all) return execOverview(main);
     if (!main.querySelector(".hero")) main.innerHTML = `<div class="skel-wrap"><div class="skel" style="height:230px"></div>
       <div class="kpis" style="margin:0">${'<div class="skel" style="height:150px"></div>'.repeat(4)}</div>
       <div class="ov-grid" style="margin:0"><div class="skel" style="height:320px"></div><div class="skel" style="height:320px"></div></div></div>`;
@@ -1086,7 +1358,8 @@ const VIEWS = {
     main.style.minHeight = main.offsetHeight + "px"; // tránh trang bị co lại làm mất vị trí cuộn
     main.innerHTML = `
       <div class="split">
-        <div class="card tree">
+        <div class="card tree collapsed">
+          <button type="button" class="tree-toggle" aria-expanded="false"><span><small>Đơn vị đang xem · bấm để đổi</small><b>${esc(u.name)}</b></span>${icon("chev")}</button>
           <div class="toolbar"><b>Đơn vị</b><button class="link" id="add-unit">+ Thêm</button></div>
           <input type="search" id="unit-search" class="tree-search" placeholder="Tìm phòng ban…" value="${esc(state.unitQuery)}" autocomplete="off">
           <div id="tree-list">${treeHtml}</div>
@@ -1101,7 +1374,7 @@ const VIEWS = {
             <div><button class="ghost" id="edit-unit">Sửa</button> <button class="ghost danger" id="del-unit">Xoá</button></div>
           </div>
           <div class="tabs">
-            ${[["org", "Sơ đồ & nhân sự"], ["process", `Quy trình (${u.processes.length})`], ...(can("docs_view") ? [["docs", `Tài liệu (${u.documents.length})`]] : []), ["target", `Mục tiêu (${u.targets.length})`], ["info", "Chức năng"]]
+            ${[["org", "Sơ đồ & nhân sự"], ["docs", `Tài liệu (${u.processes.length + (can("docs_view") ? u.documents.length : 0)})`], ["target", `Mục tiêu (${u.targets.length})`], ["info", "Chức năng"]]
               .map(([k, l]) => `<button data-tab="${k}" class="${state.unitTab === k ? "active" : ""}">${l}</button>`).join("")}
           </div>
           <div id="tab-body"></div>
@@ -1109,6 +1382,8 @@ const VIEWS = {
       </div>`;
 
     main.querySelector(".tree").scrollTop = treeScroll;
+    const treeBox = main.querySelector(".tree"), treeBtn = treeBox.querySelector(".tree-toggle");
+    treeBtn.onclick = () => treeBtn.setAttribute("aria-expanded", String(!treeBox.classList.toggle("collapsed")));
     $("#unit-search").oninput = (e) => {
       state.unitQuery = e.target.value;
       $("#tree-list").innerHTML = buildTree(state.unitQuery);
@@ -1120,7 +1395,7 @@ const VIEWS = {
     $("#del-unit").onclick = () => confirmDelete("units", u.id, `đơn vị "${u.name}" (kèm chức danh, quy trình, mục tiêu)`, () => (state.unitId = null));
 
     const body = $("#tab-body");
-    if (state.unitTab === "docs" && !can("docs_view")) state.unitTab = "org";
+    if (!TAB_SLUG[state.unitTab]) state.unitTab = state.unitTab === "process" ? "docs" : "org";
     await UNIT_TABS[state.unitTab](body, u);
 
     // Giữ nguyên vị trí cuộn của trang sau khi nội dung đã vẽ xong
@@ -1352,8 +1627,8 @@ const VIEWS = {
     const PAGE = 50;
     const ACT = { create: "Thêm mới", update: "Sửa", delete: "Xoá" };
     const ACT_CLASS = { create: "ok", update: "brand", delete: "bad" };
-    const TBL = { units: "Đơn vị", employees: "Nhân sự", positions: "Chức danh", processes: "Quy trình", targets: "Mục tiêu" };
-    const h = (state.hist ||= { entity: "", action: "", user_id: "", q: "", date_from: "", date_to: "", page: 0, open: new Set() });
+    const TBL = { units: "Đơn vị", employees: "Nhân sự", positions: "Chức danh", processes: "Quy trình", targets: "Mục tiêu", action_programs: "Chương trình hành động" };
+    const h =(state.hist ||= { entity: "", action: "", user_id: "", q: "", date_from: "", date_to: "", page: 0, open: new Set() });
     const params = (extra = {}) => {
       const p = new URLSearchParams();
       for (const k of ["entity", "action", "user_id", "q", "date_from", "date_to"]) if (h[k]) p.set(k, h[k]);
@@ -1390,11 +1665,11 @@ const VIEWS = {
       return to ? `<button class="link" onclick="${to}">Mở đối tượng →</button>` : "";
     };
     const row = (l, extraClass = "") => `<tr class="hist-row ${extraClass}" data-id="${l.id}" style="cursor:pointer">
-        <td class="muted" style="white-space:nowrap">${esc(l.ts)}</td>
-        <td>${who(l)}</td>
-        <td><span class="badge ${ACT_CLASS[l.action] || ""}">${ACT[l.action] || esc(l.action)}</span>${l.undone ? ' <span class="badge">Đã hoàn tác</span>' : ""}</td>
-        <td>${esc(TBL[l.entity] || l.entity)}: <b>${objName(l)}</b></td>
-        <td>${diff(l)}</td></tr>
+        <td class="muted" data-label="Thời gian" style="white-space:nowrap">${esc(l.ts)}</td>
+        <td data-label="Người thực hiện">${who(l)}</td>
+        <td data-label="Thao tác"><span class="badge ${ACT_CLASS[l.action] || ""}">${ACT[l.action] || esc(l.action)}</span>${l.undone ? ' <span class="badge">Đã hoàn tác</span>' : ""}</td>
+        <td data-label="Đối tượng">${esc(TBL[l.entity] || l.entity)}: <b>${objName(l)}</b></td>
+        <td data-label="Thay đổi">${diff(l)}</td></tr>
       ${h.open.has(l.id) ? `<tr class="hist-detail"><td colspan="5">
         <div class="toolbar" style="margin:0"><div><b>${objName(l)}</b> · ${esc(TBL[l.entity] || l.entity)} · ${ACT[l.action] || ""} bởi ${who(l)} lúc ${esc(l.ts)}</div>
           <div class="btn-group">${link(l)} ${l.can_undo ? `<button class="ghost" data-undo="${l.id}">${icon("reset")}Hoàn tác</button>` : ""}</div></div>
@@ -1412,9 +1687,9 @@ const VIEWS = {
     const body = parts.map((g) => {
       if (g.length < 3) return g.map((l) => row(l)).join("");
       const key = `g${g[0].id}`, open = h.open.has(key), l0 = g[0];
-      return `<tr class="hist-group" data-group="${key}" style="cursor:pointer"><td class="muted" style="white-space:nowrap">${esc(l0.ts.slice(0, 10))} ${esc(g[g.length - 1].ts.slice(11))} – ${esc(l0.ts.slice(11))}</td>
-        <td>${who(l0)}</td><td><span class="badge ${ACT_CLASS[l0.action] || ""}">${ACT[l0.action]}</span></td>
-        <td colspan="2"><b>${g.length} ${esc((TBL[l0.entity] || l0.entity).toLowerCase())}</b> <span class="muted">${open ? "▾ thu gọn" : "▸ bấm để xem từng mục"}</span></td></tr>
+      return `<tr class="hist-group" data-group="${key}" style="cursor:pointer"><td class="muted" data-label="Thời gian" style="white-space:nowrap">${esc(l0.ts.slice(0, 10))} ${esc(g[g.length - 1].ts.slice(11))} – ${esc(l0.ts.slice(11))}</td>
+        <td data-label="Người thực hiện">${who(l0)}</td><td data-label="Thao tác"><span class="badge ${ACT_CLASS[l0.action] || ""}">${ACT[l0.action]}</span></td>
+        <td colspan="2" data-label="Đối tượng"><b>${g.length} ${esc((TBL[l0.entity] || l0.entity).toLowerCase())}</b> <span class="muted">${open ? "▾ thu gọn" : "▸ bấm để xem từng mục"}</span></td></tr>
         ${open ? g.map((l) => row(l, "hist-child")).join("") : ""}`;
     }).join("");
 
@@ -1438,7 +1713,7 @@ const VIEWS = {
         </div>
       </div>
       ${items.length ? `<div class="card hist-table"><table>
-        <tr><th>Thời gian</th><th>Người thực hiện</th><th>Thao tác</th><th>Đối tượng</th><th>Thay đổi</th></tr>${body}</table></div>
+        <tr class="hist-head"><th>Thời gian</th><th>Người thực hiện</th><th>Thao tác</th><th>Đối tượng</th><th>Thay đổi</th></tr>${body}</table></div>
         <div class="toolbar" style="margin-top:12px"><span class="muted">${data.total} thay đổi · trang ${h.page + 1}/${pages}</span>
           <div class="btn-group"><button class="ghost" id="h-prev" ${h.page === 0 ? "disabled" : ""}>${icon("left")}Trước</button>
           <button class="ghost" id="h-next" ${h.page + 1 >= pages ? "disabled" : ""}>Sau${icon("right")}</button></div></div>`
@@ -1482,12 +1757,13 @@ const VIEWS = {
     const go = (patch) => { Object.assign(P, patch); VIEWS.proposals(main); };
     const when = (s) => esc(String(s || "").slice(0, 16));
     const prioBadge = (p) => (p.priority === "high" ? '<span class="badge bad">Ưu tiên cao</span>' : p.priority === "low" ? '<span class="badge">Ưu tiên thấp</span>' : "");
+    const staleChip = (p) => (p.review_stale ? `<span class="pp-chip bad">${icon("alert")}Chờ nghiệm thu ${p.review_days} ngày</span>` : "");
     const dueChip = (p) => (p.due_date ? `<span class="pp-chip${p.overdue ? " bad" : ""}">${icon("alert")}Hạn ${esc(p.due_date)}${p.overdue ? " · quá hạn" : ""}</span>` : "");
     // Nhãn nút theo trạng thái hiện tại → trạng thái đích; thứ tự ưu tiên chọn nút chính
-    const moveLabel = (from, to) => ({ approved: "Duyệt đề xuất", in_progress: from === "approved" ? "Bắt đầu thực hiện" : from === "review" ? "Trả lại làm tiếp" : "Mở lại thực hiện",
+    const moveLabel = (from, to) => ({ in_progress: from === "new" ? "Duyệt & bắt đầu thực hiện" : from === "review" ? "Trả lại làm tiếp" : "Mở lại thực hiện",
       review: "Báo hoàn thành", done: "Nghiệm thu hoàn thành", dropped: "Không thực hiện", new: "Mở lại đề xuất" })[to];
-    const MAIN_ORDER = ["done", "review", "approved", "in_progress", "new"];
-    const STEPS = ["new", "approved", "in_progress", "review", "done"];
+    const MAIN_ORDER = ["done", "review", "in_progress", "new"];
+    const STEPS = ["new", "in_progress", "review", "done"];
 
     if (P.open) {  // ---- Chi tiết một đề xuất ----
       let p;
@@ -1504,7 +1780,7 @@ const VIEWS = {
       const moves = [...p.moves].sort((a, b) => MAIN_ORDER.indexOf(a) - MAIN_ORDER.indexOf(b) || 0);
       const mainMove = moves.find((s) => s !== "dropped");
       const btn = (s) => `<button class="${s === mainMove ? "primary" : s === "dropped" ? "ghost danger" : "ghost"}" data-move="${s}">${s === mainMove ? icon("check") : ""}${moveLabel(p.status, s)}</button>`;
-      const actions = `${moves.filter((s) => s !== "dropped").map(btn).join("")}${p.can_assign ? `<button class="ghost" id="prop-assign">${icon("users")}Giao việc / đặt hạn</button>` : ""}${moves.includes("dropped") ? btn("dropped") : ""}`;
+      const actions = `${moves.filter((s) => s !== "dropped").map(btn).join("")}${p.can_assign ? `<button class="ghost" id="prop-assign">${icon("users")}Giao việc / đặt hạn</button>` : ""}${p.can_archive ? `<button class="ghost" id="prop-archive">${icon("file")}Lưu kết quả vào kho tài liệu</button>` : ""}${moves.includes("dropped") ? btn("dropped") : ""}`;
 
       const fileCard = (kind, title, hint, canUp) => {
         const fs = p.files.filter((f) => f.kind === kind);
@@ -1512,12 +1788,12 @@ const VIEWS = {
           ${canUp ? `<button class="ghost pp-sm" data-up="${kind}">${icon("upload")}Tải lên</button>` : ""}</div>
           ${fs.length ? `<ul class="pp-files">${fs.map((f) => `<li><span class="pp-fico">${icon("file")}</span>
             <div class="pp-fmeta"><a href="/api/proposals/${p.id}/files/${f.id}">${esc(f.filename)}</a>
-              <small>${fmtSize(f.size_bytes)} · ${esc(f.by_name || "—")} · ${when(f.uploaded_at)}</small></div>
+              <small>${fmtSize(f.size_bytes)} · ${esc(f.by_name || "—")} · ${when(f.uploaded_at)}${f.archived ? " · đã lưu vào kho tài liệu" : ""}</small></div>
             ${isBoss || f.uploaded_by === state.user.id ? `<button class="link danger" data-del-file="${f.id}">Xoá</button>` : ""}</li>`).join("")}</ul>`
             : `<div class="pp-empty">Chưa có file${canUp ? ' — bấm “Tải lên” để thêm' : ""}.</div>`}</section>`;
       };
 
-      const EV = { create: "Tạo đề xuất", assign: "Giao việc", note: "Cập nhật ghi chú", file: "File" };
+      const EV = { create: "Tạo đề xuất", assign: "Giao việc", note: "Cập nhật ghi chú", file: "File", archive: "Lưu vào kho tài liệu" };
       const events = [...p.events].reverse().map((e) => `<li class="${e.kind}"><span class="pp-dot"></span><div>
         <b>${e.kind === "status" ? `${esc(PROPOSAL_STATUS[e.from_status] || "")} → ${esc(PROPOSAL_STATUS[e.to_status] || "")}` : esc(EV[e.kind] || e.kind)}</b>
         ${e.note ? `<p>${esc(e.note)}</p>` : ""}<small>${esc(e.by_name || "—")} · ${when(e.at)}</small></div></li>`).join("");
@@ -1526,7 +1802,7 @@ const VIEWS = {
         <button class="link pp-back" id="prop-back">← Danh sách đề xuất</button>
         <section class="card pp-head">
           <div class="pp-title"><h2>${esc(p.title)}</h2><span class="badge ${PROPOSAL_CLASS[p.status]}">${PROPOSAL_STATUS[p.status]}</span></div>
-          <div class="pp-chips"><span class="pp-chip">${icon("users")}${esc(p.author || "—")}</span><span class="pp-chip">${when(p.created_at)}</span>${dueChip(p)}${prioBadge(p)}</div>
+          <div class="pp-chips"><span class="pp-chip">${icon("users")}${esc(p.author || "—")}</span><span class="pp-chip">${when(p.created_at)}</span>${dueChip(p)}${staleChip(p)}${prioBadge(p)}</div>
           ${stepper}
           <div class="pp-actions">${actions || '<span class="muted">Bạn chỉ xem được đề xuất này.</span>'}</div>
         </section>
@@ -1561,6 +1837,9 @@ const VIEWS = {
         { name: "priority", label: "Ưu tiên", type: "select", options: Object.entries(meta.priority), half: true },
         { name: "note", label: "Ghi chú của Ban TGĐ", type: "textarea" },
       ], p, (d) => api(`/api/proposals/${p.id}`, { method: "PUT", body: { ...d, owner_user_id: d.owner_user_id || null } }).then(refresh)));
+      $("#prop-archive")?.addEventListener("click", () => openForm("Lưu kết quả vào kho tài liệu", [
+        { name: "access_level", label: "Độ mật của tài liệu", type: "select", options: Object.entries(meta.levels) },
+      ], { access_level: "internal" }, (d) => api(`/api/proposals/${p.id}/archive`, { method: "POST", body: d }).then(() => { toast("Đã lưu vào kho tài liệu, hệ thống đang đọc nội dung file"); refresh(); }), "Lưu vào kho"));
       main.querySelectorAll("[data-up]").forEach((b) => (b.onclick = () => openForm(
         b.dataset.up === "ref" ? "Tải tài liệu tham chiếu" : "Tải file kết quả / bằng chứng",
         [{ name: "file", label: `Chọn file (tối đa ${meta.max_mb} MB)`, type: "file", accept: meta.allowed_ext.join(","), required: true }], {},
@@ -1573,20 +1852,40 @@ const VIEWS = {
     }
 
     // ---- Danh sách ----
-    const q = P.filter === "mine" ? "?mine=true" : P.filter ? `?status=${encodeURIComponent(P.filter)}` : "";
+    const q = "?" + [P.mine && "mine=true", P.filter && `status=${encodeURIComponent(P.filter)}`].filter(Boolean).join("&");
     const list = await api("/api/proposals" + q);
-    const tabs = [["", "Tất cả"], ["mine", "Giao cho tôi"], ...Object.entries(PROPOSAL_STATUS)];
+    const stale = isBoss ? list.filter((p) => p.review_stale).length : 0;
+    const tabs = [["", "Tất cả"], ...Object.entries(PROPOSAL_STATUS)];
     main.innerHTML = `
       <div class="page-head"><div><h2>Đề xuất cải tiến</h2>
-        <p>Đề xuất lưu từ câu trả lời của Trợ lý AI. ${isBoss ? "Ban TGĐ duyệt, giao người phụ trách, đặt hạn và nghiệm thu." : "Bạn thấy đề xuất do mình lưu và việc được giao cho mình."}</p></div></div>
-      <div class="tabs">${tabs.map(([v, l]) => `<button class="${v === P.filter ? "active" : ""}" data-st="${v}">${l}</button>`).join("")}</div>
+        <p>Tự nhập đề xuất hoặc lưu từ câu trả lời của Trợ lý AI. ${isBoss ? "Ban TGĐ duyệt, giao người phụ trách, đặt hạn và nghiệm thu." : "Bạn thấy đề xuất do mình tạo và việc được giao cho mình."}</p></div>
+        <button class="primary" id="prop-new">${icon("plus")}Đề xuất mới</button></div>
+      ${stale ? `<div class="pp-dropped">${icon("alert")}<span><b>${stale} đề xuất chờ nghiệm thu từ ${meta.stale_days} ngày trở lên.</b> Mở từng đề xuất để nghiệm thu hoặc trả lại.</span></div>` : ""}
+      <div class="tabs">${tabs.map(([v, l]) => `<button class="${v === P.filter ? "active" : ""}" data-st="${v}">${l}</button>`).join("")}
+        <button class="${P.mine ? "active" : ""}" id="prop-mine" title="Chỉ hiện việc được giao cho tôi" style="margin-left:auto">${icon("users")}Chỉ việc của tôi</button></div>
       ${list.length ? `<div class="pp-list">${list.map((p) => `<article class="card pp-item" data-open="${p.id}" tabindex="0" role="button">
           <div class="pp-item-main"><h3>${esc(p.title)}</h3>
             <div class="pp-chips"><span class="pp-chip">${icon("users")}${esc(p.author || "—")}</span><span class="pp-chip">${esc(String(p.created_at).slice(0, 10))}</span>
-              ${p.owner_name || p.owner ? `<span class="pp-chip brand">Phụ trách: ${esc(p.owner_name || p.owner)}</span>` : ""}${dueChip(p)}${prioBadge(p)}
+              ${p.owner_name || p.owner ? `<span class="pp-chip brand">Phụ trách: ${esc(p.owner_name || p.owner)}</span>` : ""}${dueChip(p)}${staleChip(p)}${prioBadge(p)}
               ${p.file_count ? `<span class="pp-chip">${icon("file")}${p.file_count} file</span>` : ""}</div></div>
           <span class="badge ${PROPOSAL_CLASS[p.status]}">${PROPOSAL_STATUS[p.status]}</span></article>`).join("")}</div>`
-        : '<div class="card empty">Chưa có đề xuất nào. Bấm “Lưu thành đề xuất” dưới câu trả lời của Trợ lý AI để thêm.</div>'}`;
+        : '<div class="card empty">Chưa có đề xuất nào. Bấm “Đề xuất mới” để thêm, hoặc “Lưu thành đề xuất” dưới câu trả lời của Trợ lý AI.</div>'}`;
+    $("#prop-new").onclick = () => openForm("Đề xuất mới", [
+      { name: "title", label: "Tiêu đề", required: true },
+      { name: "body", label: "Nội dung đề xuất", type: "textarea" },
+      { name: "file", label: `Tài liệu tham chiếu (không bắt buộc, tối đa ${meta.max_mb} MB)`, type: "file", accept: meta.allowed_ext.join(",") },
+    ], {}, async (d) => {
+      const p = await api("/api/proposals", { method: "POST", body: { title: d.title, body: d.body || "" } });
+      if (d.file) {
+        const fd = new FormData();
+        fd.append("kind", "ref");
+        fd.append("file", d.file);
+        try { await api(`/api/proposals/${p.id}/files`, { method: "POST", body: fd }); }
+        catch (e) { toast(`Đã tạo đề xuất nhưng chưa tải được file: ${e.message}`, "err"); }
+      }
+      go({ open: p.id });
+    }, "Gửi đề xuất");
+    $("#prop-mine").onclick = () => go({ mine: !P.mine });
     main.querySelectorAll("[data-st]").forEach((b) => (b.onclick = () => go({ filter: b.dataset.st })));
     main.querySelectorAll("[data-open]").forEach((el) => {
       el.onclick = () => go({ open: el.dataset.open });
@@ -1597,6 +1896,11 @@ const VIEWS = {
   async targets(main, period) {
     const fetchPeriod = (p) => api("/api/targets/progress" + (p ? `?period=${encodeURIComponent(p)}` : ""));
     let data = await fetchPeriod(period);
+    // Mặc định mở số cả năm của năm mới nhất (server trả kỳ mới nhất, thường là một quý)
+    if (!period && data.periods.length) {
+      const y = periodValues(data.periods[0]).year;
+      if (data.period !== y && data.periods.includes(y)) { period = y; data = await fetchPeriod(y); }
+    }
     // Mở từ Lịch sử thay đổi: tìm đúng kỳ chứa mục tiêu đó rồi mở sẵn chi tiết dòng
     const focusId = state.targetFocus;
     state.targetFocus = null;
@@ -1606,7 +1910,11 @@ const VIEWS = {
         if (d.items.some((t) => t.id === focusId)) { data = d; break; }
       }
     }
-    const { periods, period: cur, items, summary, elapsed_pct: elapsed } = data;
+    // Kỳ người dùng chọn mà chưa có mục tiêu: server trả kỳ mới nhất thay thế, nên ở đây giữ đúng kỳ đã chọn và coi như trống
+    const missing = period && /^\d{4}(-Q[1-4])?$/.test(period) && !data.periods.includes(period);
+    const { periods, summary, elapsed_pct: elapsed } = data;
+    const cur = missing ? period : data.period;
+    const items = missing ? [] : data.items;
     // Chỉ admin/CEO sửa, xoá, thêm mục tiêu ngay trên trang này (dòng toàn công ty không có tab đơn vị để sửa)
     const canEdit = ["admin", "ceo"].includes(state.user?.role);
     const unitOptions = canEdit ? [["", "Toàn công ty"], ...(await api("/api/units")).map((u) => [u.id, u.name])] : [];
@@ -1808,7 +2116,7 @@ const VIEWS = {
       const list = [...rowsByKey.values()].filter((r) => Object.keys(r.q).length)
         .sort((a, b) => order(a.t) - order(b.t) || String(a.t.unit_name || "").localeCompare(String(b.t.unit_name || ""), "vi"));
       const head = `<div class="tq-head"><h3 style="margin:0">Theo quý · năm ${esc(year)}</h3><span class="muted">Thêm mục tiêu với Kỳ = Quý 1 đến Quý 4 để có số từng quý.</span></div>`;
-      if (!list.length) return `<div class="card" style="margin-top:16px">${head}<div class="empty">Năm ${esc(year)} chưa có số theo quý.</div></div>`;
+      if (!list.length) return "";
       const cell = (t, label) => {
         if (!t || (t.target_value == null && t.actual_value == null)) return '<span class="muted">—</span>';
         const sfx = label === "%" ? "%" : "", pct = t.target_value > 0 && t.actual_value != null ? ` · ${Math.round((t.actual_value / t.target_value) * 100)}%` : "";
@@ -1822,32 +2130,105 @@ const VIEWS = {
         const qTargets = qs.map((t) => t.target_value);
         return cell({ actual_value: sum("actual_value"), target_value: r.year?.target_value ?? (qTargets.every((x) => x != null) ? sum("target_value") : null) }, label);
       };
-      return `<div class="card tq" style="margin-top:16px">${head}<div class="table-scroll"><table>
+      return `<div class="card tq" id="tq-card" style="margin-top:16px${state.showQuarters ? "" : ";display:none"}">${head}<div class="table-scroll"><table>
         <tr><th>Chỉ tiêu</th><th>Đơn vị</th>${QS.map((k, i) => `<th class="num">Quý ${i + 1}</th>`).join("")}<th class="num">Cả năm (lũy kế)</th></tr>
         ${list.map((r) => { const label = r.t.unit_label || ""; return `<tr><td>${esc(metricName(r.t))}</td><td>${esc(r.t.unit_name || "Toàn công ty")}</td>
           ${QS.map((k) => `<td class="num">${cell(r.q[k], label)}</td>`).join("")}<td class="num">${yearCell(r, label)}</td></tr>`; }).join("")}
       </table></div></div>`;
     };
 
+    // Chương trình hành động (POA) của năm đang chọn; mọi tài khoản xem được, chỉ admin/CEO thêm/sửa/xoá.
+    const progYear = periodValues(cur).year;
+    let programsError = "";
+    const programs = await api(`/api/action-programs?year=${encodeURIComponent(progYear)}`).catch((e) => { programsError = e.message || "lỗi không rõ"; return []; });
+    const PSTATUS = { planned: ["", "Chưa bắt đầu"], doing: ["brand", "Đang thực hiện"], done: ["ok", "Hoàn thành"], paused: ["warn", "Tạm dừng"] };
+    const fmtDate = (d) => (d ? String(d).split("-").reverse().join("/") : "…");
+    const programForm = (p = {}) => openForm(p.id ? "Sửa chương trình hành động" : "Thêm chương trình hành động", [
+      { name: "code", label: "Mã", placeholder: "POA 06", half: true },
+      { name: "owner", label: "Phụ trách", placeholder: "Ban Dự án, Toàn công ty...", half: true },
+      { name: "name", label: "Chương trình", type: "textarea", required: true },
+      { name: "start_date", label: "Bắt đầu", type: "date", half: true },
+      { name: "end_date", label: "Kết thúc", type: "date", half: true },
+      { name: "status", label: "Trạng thái", type: "select", options: Object.entries(PSTATUS).map(([k, v]) => [k, v[1]]), default: "doing", half: true },
+      { name: "progress", label: "Tiến độ (%)", type: "number", half: true },
+      { name: "notes", label: "Ghi chú", type: "textarea" },
+    ], { start_date: `${progYear}-01-01`, end_date: `${progYear}-12-31`, ...p }, async (raw) => {
+      const pg = raw.progress === "" || raw.progress == null ? null : Number(raw.progress);
+      if (pg != null && (!(pg >= 0) || pg > 100)) throw new Error("tiến độ phải từ 0 đến 100.");
+      const body = { ...raw, progress: pg, year: progYear };
+      if (p.id) await api(`/api/action_programs/${p.id}`, { method: "PUT", body });
+      else await api("/api/action_programs", { method: "POST", body: { ...body, sort_order: programs.length + 1 } });
+      reload();
+    });
+    const programsHtml = () => `<div class="card" style="margin-top:16px" id="poa-card">
+      <div class="tq-head"><h3 style="margin:0">Chương trình hành động · năm ${esc(progYear)}</h3>
+        ${canEdit ? '<button type="button" class="ghost" id="poa-add">+ Thêm chương trình</button>' : ""}</div>
+      ${programs.length ? `<div class="table-scroll"><table>
+        <tr><th>STT</th><th>Chương trình</th><th>Phụ trách</th><th>Timeline</th><th>Trạng thái</th><th>Tiến độ</th>${canEdit ? "<th></th>" : ""}</tr>
+        ${programs.map((p, i) => `<tr>
+          <td>${i + 1}</td>
+          <td>${p.code ? `<b>${esc(p.code)}</b>: ` : ""}${esc(p.name)}${p.notes ? `<br><small class="muted">${esc(p.notes)}</small>` : ""}</td>
+          <td>${esc(p.owner || "—")}</td>
+          <td>${fmtDate(p.start_date)} – ${fmtDate(p.end_date)}</td>
+          <td><span class="badge ${(PSTATUS[p.status] || PSTATUS.doing)[0]}">${(PSTATUS[p.status] || PSTATUS.doing)[1]}</span></td>
+          <td>${p.progress == null ? '<span class="muted">—</span>' : `${bar(p.progress, "ok")}<small>${p.progress}%</small>`}</td>
+          ${canEdit ? `<td class="row-actions"><button type="button" class="row-icon-btn" data-poa-edit="${p.id}" title="Sửa chương trình" aria-label="Sửa chương trình">${icon("edit")}</button><button type="button" class="row-icon-btn danger" data-poa-del="${p.id}" title="Xoá chương trình" aria-label="Xoá chương trình">${icon("trash")}</button></td>` : ""}
+        </tr>`).join("")}
+      </table></div>` : programsError ? `<div class="empty">Không tải được chương trình hành động (${esc(programsError)}). Hãy khởi động lại app rồi tải lại trang.</div>`
+        : `<div class="empty">Năm ${esc(progYear)} chưa có chương trình hành động.${canEdit ? " Bấm “Thêm chương trình” để nhập." : ""}</div>`}
+    </div>`;
+
+    // Bộ lọc kỳ: ô Năm + ô Kỳ (Cả năm / Quý 1-4), ghép thành "2026" hoặc "2026-Q3" như dữ liệu
+    const { year: curYear, quarter: curQuarter } = periodValues(cur);
+    const years = [...new Set([...periods.map((p) => periodValues(p).year), curYear])].sort().reverse();
+    const quarterBlock = quarterHtml();
+
     main.innerHTML = `
-      <div class="page-head"><div><h2>Mục tiêu trọng yếu</h2>
+      <div class="page-head"><div><h2>Mục tiêu</h2>
         <p>Thực hiện so với mục tiêu theo kỳ. Đạt từ 100%; từ 70% đến dưới 100% là cần theo dõi; dưới 70% là chậm.
           Chỉ hiện mục tiêu của các đơn vị bạn được xem.</p></div>
         <div class="head-actions">
           ${canEdit ? '<button type="button" class="primary" id="tp-add">+ Thêm mục tiêu</button>' : ""}
-          ${items.length ? `<a class="ghost btn-link" id="tp-xlsx" href="/api/targets/export?period=${encodeURIComponent(cur)}" download>Xuất Excel</a>
-            <button type="button" class="ghost" id="tp-print">In / lưu PDF</button>
-            ${canSee("chat") ? `<button type="button" class="primary accent" id="tp-ai">${icon("spark")} Hỏi Trợ lý AI</button>` : ""}` : ""}
-          ${periods.length ? `<label class="period-pick"><span>Kỳ báo cáo</span><select id="tp-period" aria-label="Chọn kỳ">${periods.map((p) => `<option ${p === cur ? "selected" : ""}>${esc(p)}</option>`).join("")}</select></label>` : ""}</div></div>
+          ${items.length ? `<details class="menu" id="tp-export"><summary class="ghost">Xuất ▾</summary>
+              <div class="menu-pop"><a class="btn-link" id="tp-xlsx" href="/api/targets/export?period=${encodeURIComponent(cur)}" download>Xuất Excel</a>
+                <button type="button" id="tp-print">In / lưu PDF</button></div></details>
+            ${canSee("chat") ? `<button type="button" class="ghost" id="tp-ai" title="Gửi số liệu đang xem cho Trợ lý AI nhận xét">${icon("spark")} Hỏi AI</button>` : ""}` : ""}
+        </div></div>
+      <div class="tp-filters">
+        <label class="period-pick"><span>Năm</span><select id="tp-year" aria-label="Chọn năm">${years.map((y) => `<option ${y === curYear ? "selected" : ""}>${y}</option>`).join("")}</select></label>
+        <div class="seg" role="group" aria-label="Chọn kỳ">${QUARTERS.map(([q, label]) => {
+          const has = periods.includes(q ? `${curYear}-${q}` : curYear);
+          return `<button type="button" data-q="${q}" class="${q === curQuarter ? "on" : ""}${has ? "" : " dim"}" aria-pressed="${q === curQuarter}" title="${has ? "" : "Chưa có mục tiêu kỳ này"}">${q ? q.replace("Q", "Quý ") : label}</button>`;
+        }).join("")}</div>
+        ${quarterBlock ? `<button type="button" class="ghost" id="tp-qcmp" aria-pressed="${!!state.showQuarters}">So sánh các quý</button>` : ""}
+      </div>
       ${!items.length ? `<div class="card empty">${periods.length ? "Kỳ này chưa có mục tiêu." : "Chưa có mục tiêu nào trong phạm vi bạn được xem. Mục tiêu được nhập trong trang Phòng ban, tab Mục tiêu."}</div>` : `
         <div class="kpis" id="tp-kpis"></div>
         ${elapsed != null ? `<p class="muted tp-elapsed">Đã qua <b>${elapsed}%</b> thời gian của kỳ ${esc(cur)} (vạch đen trên thanh tiến độ). Dự báo cuối kỳ tính theo tốc độ hiện tại. Bấm một dòng để xem chi tiết, bấm thẻ để lọc, bấm tiêu đề cột để sắp xếp.</p>` : ""}
         ${insightHtml}
         <div class="card" style="margin-top:16px"><div class="sort-bar" id="tp-sortbar"></div><table id="tp-table"></table></div>`}
-      ${quarterHtml()}`;
+      ${programsHtml()}${quarterBlock}`;
     main.querySelector("#tp-add")?.addEventListener("click", () => targetForm());
-    const sel = main.querySelector("#tp-period");
-    if (sel) sel.onchange = () => VIEWS.targets(main, sel.value);
+    main.querySelector("#poa-add")?.addEventListener("click", () => programForm());
+    main.querySelectorAll("[data-poa-edit]").forEach((b) => (b.onclick = () => programForm(programs.find((p) => p.id == b.dataset.poaEdit))));
+    main.querySelectorAll("[data-poa-del]").forEach((b) => (b.onclick = () => confirmDelete("action_programs", b.dataset.poaDel, "chương trình này", reload)));
+    main.querySelectorAll("[data-q]").forEach((b) => (b.onclick = () => { if (b.dataset.q !== curQuarter) VIEWS.targets(main, b.dataset.q ? `${curYear}-${b.dataset.q}` : curYear); }));
+    const exportMenu = main.querySelector("#tp-export");
+    if (exportMenu) {  // menu Xuất: đóng khi bấm ra ngoài hoặc chọn một mục
+      const close = (e) => { if (!exportMenu.isConnected) return document.removeEventListener("click", close); if (!exportMenu.contains(e.target) || e.target.closest(".menu-pop")) exportMenu.open = false; };
+      document.addEventListener("click", close);
+    }
+    // Đổi năm: ưu tiên cả năm, không có thì lấy kỳ đầu tiên đã có số của năm đó
+    main.querySelector("#tp-year").onchange = (e) => {
+      const y = e.target.value, mine = periods.filter((p) => periodValues(p).year === y).sort();
+      VIEWS.targets(main, mine.includes(y) ? y : mine[0] || y);
+    };
+    main.querySelector("#tp-qcmp")?.addEventListener("click", (e) => {
+      state.showQuarters = !state.showQuarters;
+      e.currentTarget.setAttribute("aria-pressed", state.showQuarters);
+      const card = main.querySelector("#tq-card");
+      if (card) card.style.display = state.showQuarters ? "" : "none";
+    });
     if (items.length) {
       main.querySelector("#tp-print").onclick = () => window.print();
       main.querySelector("#tp-ai")?.addEventListener("click", askAI);
@@ -1860,9 +2241,9 @@ const VIEWS = {
     const ins = await api("/api/insights");
     const unitLink = (id, name) => `<button class="link" onclick="go('units',{unitId:${id}})">${esc(name)}</button>`;
     const clean = [];  // mục không có gì để báo: gom thành một dòng thay vì mỗi mục một thẻ trống
-    const block = (title, items, fmt, note) => {
+    const block = (title, items, fmt, note, key = "") => {
       if (!items.length) { clean.push(title); return ""; }
-      return `<div class="card insight">
+      return `<div class="card insight" ${key ? `data-focus="${key}"` : ""}>
         <h3>${title} <span class="badge">${items.length}</span></h3>
         ${note ? `<p class="muted">${note}</p>` : ""}
         <ul>${items.map(fmt).join("")}</ul>
@@ -1894,11 +2275,11 @@ const VIEWS = {
             ${Object.entries(byTitle).map(([t, rs]) => `<div class="p-role"><b>${esc(t)}</b> <span class="chips">${rs.map((r) => chip(r.unit_id, r.unit_name)).join("")}</span>${reportsTo[t] ? ` <span class="muted">→ báo cáo <b>${esc(reportsTo[t])}</b></span>` : ""}</div>`).join("")}
             ${total ? `<details class="p-manages" ${total <= 6 ? "open" : ""}><summary>Quản lý trực tiếp <span class="badge">${total}</span></summary>${groups}</details>` : ""}</li>`;
         },
-          "Kiêm nhiệm giúp tiết kiệm chi phí nhưng tạo rủi ro quá tải và xung đột lợi ích (đặc biệt kiểm soát nội bộ vs tài chính).")}
+          "Kiêm nhiệm giúp tiết kiệm chi phí nhưng tạo rủi ro quá tải và xung đột lợi ích (đặc biệt kiểm soát nội bộ vs tài chính).", "concurrent")}
         ${block("Vị trí đang trống (TBA)", ins.vacancies, (x) => `<li>${esc(x.title)} – ${unitLink(x.unit_id, x.unit_name)}${x.reports_to ? ` · báo cáo <b>${esc(x.reports_to)}</b>` : ""}</li>`,
-          "Khi vị trí đứng đầu còn trống, cấp trên trực tiếp đang quản lý đơn vị.")}
+          "Khi vị trí đứng đầu còn trống, cấp trên trực tiếp đang quản lý đơn vị.", "vacancies")}
         ${block("Phòng/ban do cấp phó phụ trách", ins.deputy_led_departments, (x) => `<li>${unitLink(x.unit_id, x.unit_name)} – ${esc(x.title)} ${esc(x.name || "TBA")}${x.reports_to ? ` · báo cáo <b>${esc(x.reports_to)}</b>` : ""}</li>`,
-          "Chưa có Trưởng phòng – cân nhắc bổ nhiệm hoặc xác nhận đây là chủ trương.")}
+          "Chưa có Trưởng phòng – cân nhắc bổ nhiệm hoặc xác nhận đây là chủ trương.", "deputy")}
         ${block("Tầm hạn quản lý (số đơn vị trực tiếp)", ins.span_of_control, (x) => `<li>${unitLink(x.unit_id, x.unit_name)}: <b>${x.direct_reports}</b>
           <span>· ${esc(x.head || "chưa có người đứng đầu")}${x.reports_to ? ` · báo cáo ${esc(x.reports_to)}` : ""}</span></li>`)}
         ${block("Phòng/ban chưa có quy trình", ins.units_without_process, (x) => `<li>${unitLink(x.unit_id, x.unit_name)}${x.reports_to ? ` · báo cáo <b>${esc(x.reports_to)}</b>` : ""}</li>`)}
@@ -1915,19 +2296,25 @@ const VIEWS = {
       ${clean.length ? `<p class="insight-clean">✓ Không phát hiện vấn đề ở: ${clean.map(esc).join(" · ")}</p>` : ""}
       <div class="card" style="margin-top:16px">
         <h3>Biên chế theo đơn vị</h3>
-        <p class="muted">Định biên là tổng số người theo sơ đồ. Nhân sự HCNS là số người đang gán vào đơn vị trong danh sách HCNS.
-          Chênh lệch âm là thiếu so với định biên; dương là dư. Chỉ là đối chiếu số liệu hiện có, chưa phải dự báo.</p>
+        <p class="muted">Định biên là tổng số người theo sơ đồ. Đã gán là số chức danh đã có người giữ; còn trống là số chức danh chưa có người.</p>
         <table>
-          <tr><th>Đơn vị</th><th class="num">Định biên</th><th class="num">Đã gán trên sơ đồ</th><th class="num">Còn trống</th><th class="num">Nhân sự HCNS</th><th class="num">Chênh lệch</th></tr>
+          <tr><th>Đơn vị</th><th class="num">Định biên</th><th class="num">Đã gán trên sơ đồ</th><th class="num">Còn trống</th></tr>
           ${ins.staffing.map((s) => `<tr>
             <td>${unitLink(s.unit_id, s.unit_name)}${s.reports_to ? `<br><small>báo cáo ${esc(s.reports_to)}</small>` : ""}</td>
             <td class="num">${s.planned}</td><td class="num">${s.seated}</td>
             <td class="num">${s.open_on_chart ? `<span class="badge warn">${s.open_on_chart}</span>` : "0"}</td>
-            <td class="num">${s.hcns_active}</td>
-            <td class="num">${s.gap === 0 ? "0" : `<span class="badge ${s.gap < 0 ? "bad" : "brand"}">${s.gap > 0 ? "+" : ""}${s.gap}</span>`}</td>
           </tr>`).join("")}
         </table>
       </div>`;
+    // đi từ thẻ "Cần chú ý" sang: cuộn tới khung được trỏ và nhá sáng để người dùng biết
+    const focus = state.focus;
+    state.focus = "";
+    const target = focus && main.querySelector(`[data-focus="${focus}"]`);
+    if (target) {
+      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      target.classList.add("flash-focus");
+      setTimeout(() => target.classList.remove("flash-focus"), 2600);
+    }
   },
 
   async docs(main) {
@@ -2335,38 +2722,8 @@ Kế hoạch lũy kế: ${bn(x.cum_plan)}
 Thực chi lũy kế: ${x.has_data ? bn(x.cum_spent) : "chưa có số"}</title></rect>
         <text x="${X(x.month)}" y="${H1 - 8}" text-anchor="middle" class="bk-ax ${x.month === m ? "on" : ""}">T${x.month}</text>`).join("")}</svg>`;
 
-    // ---- Chi theo tháng ----
-    const H2 = 130, pb2 = 24, ih2 = H2 - 22 - pb2, avg = T.plan / 12;
-    const bmax = Math.max(avg, ...r.monthly.map((x) => x.spent)) * 1.15 || 1;
-    const chart2 = `<svg viewBox="0 0 ${W} ${H2}" class="bk-chart" role="img" aria-label="Chi thực tế theo tháng">
-      ${r.monthly.map((x) => {
-        const h = (x.spent / bmax) * ih2, over = x.spent > avg;
-        return `<g><title>Tháng ${x.month}: chi ${bn(x.spent)}${over ? " (cao hơn bình quân kế hoạch)" : ""}</title>
-          <rect x="${X(x.month) - iw / 12 * 0.3}" y="${22 + ih2 - h}" width="${iw / 12 * 0.6}" height="${Math.max(h, x.has_data ? 1.5 : 0)}" rx="5" fill="${over ? "var(--accent)" : "var(--brand)"}" opacity="${x.has_data ? 1 : 0.15}"/>
-          ${x.has_data && x.spent ? `<text x="${X(x.month)}" y="${22 + ih2 - h - 5}" text-anchor="middle" class="bk-val">${bn(x.spent).replace(" ", " ")}</text>` : ""}
-          <text x="${X(x.month)}" y="${H2 - 7}" text-anchor="middle" class="bk-ax ${x.month === m ? "on" : ""}">T${x.month}</text></g>`;
-      }).join("")}
-      <line x1="${pl}" x2="${W - pr}" y1="${22 + ih2 - (avg / bmax) * ih2}" y2="${22 + ih2 - (avg / bmax) * ih2}" class="bk-avg"/>
-      <text x="${pl}" y="12" class="bk-ax">Chi theo tháng · vạch đỏ: bình quân kế hoạch ${bn(avg)}/tháng</text></svg>`;
-
-    // ---- Cơ cấu ngân sách theo nhóm (vòng tròn) ----
-    const DR = 66, DC = 2 * Math.PI * DR, totalPlan = r.sections.reduce((a, s) => a + s.plan, 0) || 1;
-    let acc = 0;
-    const donut = `<svg viewBox="0 0 180 180" class="bk-donut" role="img" aria-label="Cơ cấu ngân sách theo nhóm chi phí">
-      ${r.sections.map((s, k) => {
-        const len = Math.max((s.plan / totalPlan) * DC - 2, 0.5), seg = `<circle cx="90" cy="90" r="${DR}" fill="none" stroke="${SEC_COLORS[k % SEC_COLORS.length]}" stroke-width="26" stroke-dasharray="${len} ${DC}" stroke-dashoffset="${-acc}" transform="rotate(-90 90 90)" class="bk-seg" data-secf="${esc(s.name)}"><title>${esc(s.name)}: ${bn(s.plan)} (${pc(s.plan / totalPlan * 100)})</title></circle>`;
-        acc += (s.plan / totalPlan) * DC;
-        return seg;
-      }).join("")}
-      <text x="90" y="86" text-anchor="middle" class="bk-d-num">${bn(totalPlan)}</text><text x="90" y="104" text-anchor="middle" class="bk-ax">ngân sách năm</text></svg>`;
-
-    // ---- Hạng mục dùng nhiều nhất (hoặc lớn nhất khi chưa có số chi) ----
-    const used = all.filter((i) => i.plan > 0 && i.spent > 0).sort((a, b) => b.percent - a.percent).slice(0, 8);
-    const biggest = [...all].sort((a, b) => b.plan - a.plan).slice(0, 8);
+    const totalPlan = r.sections.reduce((a, s) => a + s.plan, 0) || 1;
     const meter = (i) => { const mx = Math.max(120, i.percent); return `<div class="bk-meter" title="${pc(i.percent)}"><i style="width:${Math.min(i.percent, mx) / mx * 100}%;background:${COLOR[i.status]}"></i><u style="left:${80 / mx * 100}%"></u><u class="r" style="left:${100 / mx * 100}%"></u></div>`; };
-    const topList = used.length
-      ? used.map((i) => `<li><div class="bk-top-h"><span title="${esc(i.name)}">${esc(i.name)}</span><b style="color:${COLOR[i.status]}">${pc(i.percent)}</b></div>${meter(i)}</li>`).join("")
-      : biggest.map((i) => `<li><div class="bk-top-h"><span title="${esc(i.name)}">${esc(i.name)}</span><b>${bn(i.plan)}</b></div><div class="bk-meter"><i style="width:${i.plan / biggest[0].plan * 100}%;background:var(--brand-400)"></i></div></li>`).join("");
 
     // ---- Cần xử lý ----
     const alerts = r.alerts;
@@ -2385,55 +2742,48 @@ Thực chi lũy kế: ${x.has_data ? bn(x.cum_spent) : "chưa có số"}</title>
           <button class="bk-btn quiet" data-act="edit" data-code="${esc(i.code)}" title="Nhập chi thực tế">${icon("edit")}</button></div></div>`).join("")
       : `<div class="empty">${r.last_data_month ? "Chưa có hạng mục nào vượt, sắp vượt hoặc bị chặn." : "Chưa có số chi thực tế nên chưa có cảnh báo."}</div>`;
     const KIND = { supplement: ["Duyệt bổ sung", "k-supp"], block: ["Chặn phát sinh", "k-stop"], unblock: ["Cho tiếp tục", "k-go"] };
-    const log = r.decisions.length ? `<ul class="bk-log">${r.decisions.map((d) => `<li class="${KIND[d.kind][1]}"><span class="dot"></span><div>
+    const log = r.decisions.length ? `<ul class="bk-log">${r.decisions.slice(0, 8).map((d) => `<li class="${KIND[d.kind][1]}"><span class="dot"></span><div>
         <b>${KIND[d.kind][0]}${d.amount ? ` ${bn(d.amount)}` : ""}</b> · ${esc(d.name || d.code)}
         <small>${d.note ? esc(d.note) + " · " : ""}${esc(d.by_name || "—")} · ${when(d.decided_at)}</small></div></li>`).join("")}</ul>`
       : '<div class="empty">Chưa có quyết định nào.</div>';
+
+    const chips = [["over", "Vượt ngân sách", T.over], ["near", "Sắp vượt", T.near], ["pace", "Vượt tiến độ", T.pace], ["lock", "Đang bị chặn", T.blocked]]
+      .filter((c) => c[2]).map(([k, l, n]) => `<span class="bk-chip ${k}"><b>${n}</b>${l}</span>`).join("");
+    const alertCard = alerts.length ? `<div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("alert")}</span>Cần xử lý<span class="sub">Duyệt bổ sung hoặc chặn không cho phát sinh thêm</span></h3></div>
+          <div class="bk-alerts">${alertHtml}</div></div>` : "";
+    const logCard = r.decisions.length ? `<details class="card bk-logbox"><summary>${icon("shield")}Quyết định gần đây (${r.decisions.length})</summary>${log}</details>` : "";
 
     main.innerHTML = `<div id="bk-root">
       <section class="bk-hero">
         <div class="bk-hero-top">
           <div><span class="bk-eyebrow">Ngân sách hoạt động</span><h2>Năm ${r.year}</h2>
-            <p>Lũy kế đến tháng ${m} so với ngân sách tổng duyệt${T.supplement ? ` (đã gồm ${bn(T.supplement)} TGĐ duyệt bổ sung)` : ""}. Vàng từ ${r.warn_pct}%, đỏ khi vượt 100%.</p></div>
+            <p>Lũy kế đến tháng ${m} so với ngân sách tổng duyệt${T.supplement ? ` (gồm ${bn(T.supplement)} duyệt bổ sung)` : ""}</p></div>
           <div class="bk-actions">
             <select id="bk-month" class="bk-glass" aria-label="Chi lũy kế đến tháng">${[...Array(12)].map((_, k) => `<option value="${k + 1}" ${k + 1 === m ? "selected" : ""}>Đến tháng ${k + 1}</option>`).join("")}</select>
-            <a class="bk-glass" href="/api/budget/actuals/template" download>${icon("download")}File mẫu</a>
+            <button class="bk-glass hot" id="bk-act">${icon("upload")}Nhập chi thực tế</button>
             <a class="bk-glass" href="/api/budget/export?month=${m}" download>${icon("file")}Xuất Excel</a>
             <button class="bk-glass" id="bk-print">${icon("file")}In / PDF</button>
-            <button class="bk-glass" id="bk-act">${icon("upload")}Nhập chi thực tế</button>
-            <button class="bk-glass" id="bk-plan">${icon("file")}Cập nhật kế hoạch</button></div></div>
+            <details class="bk-more"><summary class="bk-glass" aria-label="Thêm">⋯</summary>
+              <div class="bk-menu"><a href="/api/budget/actuals/template" download>${icon("download")}Tải file mẫu nhập chi</a>
+                <button id="bk-plan">${icon("file")}Cập nhật kế hoạch</button></div></details></div></div>
         <div class="bk-hero-body">
           ${gauge}
           <div class="bk-hero-nums">
-            <div><span>Ngân sách hiệu lực</span><b>${bn(T.plan)}</b><small>Bình quân ${bn(T.plan / 12)}/tháng</small></div>
-            <div><span>Đã chi lũy kế (T1–T${m})</span><b>${bn(T.spent)}</b><small>Theo tiến độ năm là ${bn(T.expected)}</small></div>
-            <div><span>Còn lại</span><b class="${T.remaining < 0 ? "neg" : ""}">${bn(T.remaining)}</b><small>${Math.max(0, 12 - m)} tháng còn lại trong năm</small></div></div>
-          <div class="bk-chips">
-            <span class="bk-chip over ${T.over ? "" : "zero"}"><b>${T.over}</b>Vượt ngân sách</span>
-            <span class="bk-chip near ${T.near ? "" : "zero"}"><b>${T.near}</b>Sắp vượt</span>
-            <span class="bk-chip pace ${T.pace ? "" : "zero"}"><b>${T.pace}</b>Vượt tiến độ</span>
-            <span class="bk-chip lock ${T.blocked ? "" : "zero"}"><b>${T.blocked}</b>Đang bị chặn</span></div></div>
-        ${r.last_data_month ? "" : `<div class="bk-cta"><div><b>Chưa có số chi thực tế</b><span>Tải file mẫu, điền chi theo tháng rồi nhập vào để bắt đầu theo dõi và nhận cảnh báo. Cũng có thể bấm biểu tượng bút ở từng hạng mục bên dưới.</span></div>
-          <a class="bk-cta-btn ghost" href="/api/budget/actuals/template" download>${icon("download")}Tải file mẫu</a>
-          <button class="bk-cta-btn" id="bk-cta-act">${icon("upload")}Nhập chi thực tế</button></div>`}
+            <div><span>Ngân sách hiệu lực</span><b>${bn(T.plan)}</b></div>
+            <div><span>Đã chi lũy kế</span><b>${bn(T.spent)}</b><small>Theo tiến độ: ${bn(T.expected)}</small></div>
+            <div><span>Còn lại</span><b class="${T.remaining < 0 ? "neg" : ""}">${bn(T.remaining)}</b></div></div></div>
+        ${chips ? `<div class="bk-chips">${chips}</div>` : ""}
+        ${r.last_data_month ? "" : `<p class="bk-hint">Chưa có số chi thực tế. <a href="/api/budget/actuals/template" download>Tải file mẫu</a>, điền chi theo tháng rồi bấm “Nhập chi thực tế”; hoặc bấm biểu tượng bút ở từng hạng mục.</p>`}
       </section>
+      ${alertCard}
       <div class="bk-grid-2">
-        <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("chart")}</span>Chi lũy kế so với ngân sách<span class="sub">Đường nét đứt là mức chi nếu đi đúng tiến độ năm</span></h3>
+        <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("chart")}</span>Chi lũy kế so với ngân sách</h3>
           <div class="bk-legend"><span><i style="background:${actColor}"></i>Thực chi</span><span><i class="dash"></i>Theo tiến độ</span></div></div>
-          ${chart1}${r.last_data_month ? chart2 : ""}</div>
-        <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("layers")}</span>Cơ cấu ngân sách<span class="sub">Theo nhóm chi phí, kèm mức đã dùng</span></h3></div>
-          ${donut}
+          ${chart1}</div>
+        <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("layers")}</span>Theo nhóm chi phí<span class="sub">Bấm để lọc bảng chi tiết</span></h3></div>
           <ul class="bk-donut-legend">${r.sections.map((s, k) => `<li class="bk-dl ${state.bkSection === s.name ? "on" : ""}" data-secf="${esc(s.name)}" title="Bấm để chỉ xem nhóm này trong bảng chi tiết"><span class="sw" style="background:${SEC_COLORS[k % SEC_COLORS.length]}"></span>
             <div><div class="bk-dl-h"><span>${esc(s.name)}</span><b style="color:${COLOR[s.status]}">${pc(s.percent)}</b></div>
-            <small class="muted">${bn(s.spent)} / ${bn(s.plan)} · ${pc(s.plan / totalPlan * 100)} tổng ngân sách</small>${bar(s)}</div></li>`).join("")}</ul></div>
-      </div>
-      <div class="bk-grid-3">
-        <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("alert")}</span>Cần xử lý<span class="sub">Tổng Giám đốc duyệt bổ sung hoặc chặn không cho phát sinh thêm</span></h3></div>
-          <div class="bk-alerts">${alertHtml}</div></div>
-        <div class="bk-side">
-          <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("target")}</span>${used.length ? "Mức sử dụng cao nhất" : "Hạng mục lớn nhất"}</h3></div>
-            <ul class="bk-top">${topList}</ul>${used.length ? '<p class="muted bk-note"><u class="a"></u>80% <u class="b"></u>100% ngân sách</p>' : ""}</div>
-          <div class="card"><div class="card-head"><h3><span class="ico-chip">${icon("shield")}</span>Quyết định gần đây</h3></div>${log}</div></div>
+            <small class="muted">${bn(s.spent)} / ${bn(s.plan)} · ${pc(s.plan / totalPlan * 100)} tổng</small>${bar(s)}</div></li>`).join("")}</ul></div>
       </div>
       <div class="card">
         <div class="toolbar bk-toolbar"><h3 style="margin:0">Chi tiết theo hạng mục <span class="muted" style="font-weight:400;font-size:13px">(triệu đồng)</span> <span id="bk-secchip"></span></h3>
@@ -2442,7 +2792,8 @@ Thực chi lũy kế: ${x.has_data ? bn(x.cum_spent) : "chưa có số"}</title>
               .map(([v, l]) => `<option value="${v}" ${v === (state.bkFilter || "") ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
         <div class="bk-scroll"><table class="bk-table"><thead><tr><th>Hạng mục</th><th class="num">Ngân sách</th><th class="num">Đã chi</th><th class="num">Còn lại</th><th style="width:150px">Mức sử dụng</th><th>Trạng thái</th><th></th></tr></thead>
         <tbody id="bk-body"></tbody></table></div>
-      </div></div>`;
+      </div>
+      ${logCard}</div>`;
 
     const plain = (s) => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/đ/g, "d").replace(/Đ/g, "D").toLowerCase();
     if (!state.bkOpen) state.bkOpen = new Set(r.sections.filter((s) => s.over + s.near + s.pace + s.blocked > 0).map((s) => s.name));
@@ -2550,7 +2901,6 @@ Thực chi lũy kế: ${x.has_data ? bn(x.cum_spent) : "chưa có số"}</title>
       VIEWS.budget(main);
     });
     $("#bk-act").onclick = pickActuals;
-    if ($("#bk-cta-act")) $("#bk-cta-act").onclick = pickActuals;
   },
 
   async aicost(main) {
@@ -2564,6 +2914,16 @@ Thực chi lũy kế: ${x.has_data ? bn(x.cum_spent) : "chưa có số"}</title>
     const KIND = { chat: "Chat với trợ lý", ocr_pdf: "Đọc PDF scan (OCR)", ocr_image: "Đọc ảnh (OCR)", verify_scan: "Đối chiếu bản scan",
       web_summary: "Tóm tắt trang web", memory: "Ghi chú / việc nền" };
     const max = Math.max(0.0001, ...r.daily.map((d) => d.cost_usd));
+    // Gom theo model: tổng tiền/lượt lấy từ by_kind (đủ cả kỳ), danh sách từng lượt lấy từ recent (tối đa 200 lượt mới nhất)
+    const models = {};
+    r.by_kind.forEach((k) => {
+      const m = (models[k.model || "—"] ||= { model: k.model || "—", calls: 0, cost: 0, kinds: [], rows: [] });
+      m.calls += k.calls; m.cost += k.cost_usd; m.kinds.push(k);
+    });
+    r.recent.forEach((c) => { const m = models[c.model || "—"]; if (m) m.rows.push(c); });
+    const modelList = Object.values(models).sort((a, b) => b.cost - a.cost);
+    const modelTotal = Math.max(0.0001, modelList.reduce((s, m) => s + m.cost, 0));
+    const fmt4 = (n) => (n == null ? "—" : Number(n).toLocaleString("vi-VN", { minimumFractionDigits: 4, maximumFractionDigits: 4 }) + " US$");
     const limitNote = r.daily_limit_usd > 0 ? `Trần công ty ${usd(r.daily_limit_usd)}/ngày` : "Không đặt trần công ty";
     main.innerHTML = `
       <div class="card">
@@ -2584,22 +2944,33 @@ Thực chi lũy kế: ${x.has_data ? bn(x.cum_spent) : "chưa có số"}</title>
           <div><b>${usd(r.all_time.cost_usd)}</b><span>Tổng đã dùng${r.all_time.since ? " từ " + esc(r.all_time.since) : ""} · ${fmtNum(r.all_time.calls)} lượt · ${fmtNum(r.all_time.input_tokens)} token vào · ${fmtNum(r.all_time.output_tokens)} token ra</span></div>
         </div>
       </div>
+      <div class="card"><h3>Theo model <span class="muted" style="font-weight:400;font-size:12px">· bấm vào để xem từng lượt gọi</span></h3>
+        ${modelList.length ? modelList.map((m) => `<details class="aic-model">
+          <summary>
+            <span class="aic-name">${esc(m.model)}</span>
+            <span class="aic-kinds">${m.kinds.map((k) => `<span class="badge">${esc(KIND[k.kind] || k.kind)} · ${fmtNum(k.calls)}</span>`).join("")}</span>
+            <span class="aic-share"><span class="quota-bar"><i style="width:${Math.round((m.cost / modelTotal) * 100)}%"></i></span></span>
+            <span class="aic-cost"><b>${usd(m.cost)}</b><small>${fmtNum(m.calls)} lượt</small></span>
+          </summary>
+          ${m.rows.length ? `<table class="aic-rows"><tr><th>Thời gian</th><th>Loại việc</th><th>Nội dung</th><th class="num">Token vào</th><th class="num">Token ra</th><th class="num">Chi phí</th></tr>
+            ${m.rows.map((c) => `<tr><td style="white-space:nowrap">${esc(fmtDay(c.ts))}</td><td>${esc(KIND[c.kind] || c.kind)}</td>
+              <td class="aic-label">${esc(c.label || "—")}</td><td class="num">${fmtNum(c.input_tokens)}</td><td class="num">${fmtNum(c.output_tokens)}</td>
+              <td class="num"><b>${fmt4(c.cost_usd)}</b></td></tr>`).join("")}</table>
+            ${m.calls > m.rows.length ? `<p class="muted" style="margin:6px 16px 12px">Đang hiện ${m.rows.length}/${fmtNum(m.calls)} lượt mới nhất (tối đa 200 lượt toàn bộ). Token vào đã gồm token cache.</p>` : `<p class="muted" style="margin:6px 16px 12px">Token vào đã gồm token cache.</p>`}`
+            : '<div class="empty">Không có lượt nào trong danh sách gần nhất.</div>'}
+        </details>`).join("") : '<div class="empty">Chưa có lượt gọi AI nào trong khoảng này.</div>'}
+      </div>
       <div class="card"><h3>Theo ngày</h3>
-        ${r.daily.length ? `<table><tr><th>Ngày</th><th class="num">Lượt gọi</th><th class="num">Token vào</th><th class="num">Token ra</th><th class="num">Chi phí</th><th style="width:30%"></th></tr>
-          ${r.daily.map((d) => `<tr><td>${esc(d.day)}</td><td class="num">${fmtNum(d.calls)}</td><td class="num">${fmtNum(d.input_tokens)}</td>
-            <td class="num">${fmtNum(d.output_tokens)}</td><td class="num">${usd(d.cost_usd)}</td>
-            <td><div class="quota-bar"><i style="width:${Math.round((d.cost_usd / max) * 100)}%"></i></div></td></tr>`).join("")}</table>`
+        ${r.daily.length ? `<div class="aic-bars">${r.daily.map((d) => `<div class="aic-bar" title="${esc(fmtDay(d.day))}: ${usd(d.cost_usd)} · ${fmtNum(d.calls)} lượt">
+            <i style="height:${Math.max(3, Math.round((d.cost_usd / max) * 100))}%"></i><span>${esc(fmtDay(d.day, true))}</span><b>${usd(d.cost_usd)}</b></div>`).join("")}</div>
+          <details class="aic-more"><summary>Xem bảng chi tiết theo ngày</summary>
+            <table><tr><th>Ngày</th><th class="num">Lượt gọi</th><th class="num">Token vào</th><th class="num">Token ra</th><th class="num">Chi phí</th></tr>
+              ${r.daily.map((d) => `<tr><td>${esc(fmtDay(d.day))}</td><td class="num">${fmtNum(d.calls)}</td><td class="num">${fmtNum(d.input_tokens)}</td>
+                <td class="num">${fmtNum(d.output_tokens)}</td><td class="num">${usd(d.cost_usd)}</td></tr>`).join("")}</table></details>`
           : '<div class="empty">Chưa có lượt gọi AI nào trong khoảng này.</div>'}
       </div>
       <div class="card"><h3>Theo người dùng</h3>
-        ${r.by_user.length ? `<table><tr><th>Người dùng</th><th class="num">Lượt gọi</th><th class="num">Chi phí</th></tr>
-          ${r.by_user.map((u) => `<tr><td>${esc(u.name)}</td><td class="num">${fmtNum(u.calls)}</td><td class="num">${usd(u.cost_usd)}</td></tr>`).join("")}</table>`
-          : '<div class="empty">Chưa có dữ liệu.</div>'}
-      </div>
-      <div class="card"><h3>Theo loại việc và model</h3>
-        ${r.by_kind.length ? `<table><tr><th>Loại việc</th><th>Model</th><th class="num">Lượt gọi</th><th class="num">Chi phí</th></tr>
-          ${r.by_kind.map((k) => `<tr><td>${esc(KIND[k.kind] || k.kind)}</td><td class="muted">${esc(k.model || "—")}</td>
-            <td class="num">${fmtNum(k.calls)}</td><td class="num">${usd(k.cost_usd)}</td></tr>`).join("")}</table>`
+        ${r.by_user.length ? `<div class="aic-users">${r.by_user.map((u) => `<div class="aic-user"><span>${esc(u.name)}</span><b>${usd(u.cost_usd)}</b><small>${fmtNum(u.calls)} lượt</small></div>`).join("")}</div>`
           : '<div class="empty">Chưa có dữ liệu.</div>'}
       </div>`;
     $("#aic-days").onchange = (e) => { state.aicostDays = Number(e.target.value); VIEWS.aicost(main); };
@@ -2704,6 +3075,16 @@ Thực chi lũy kế: ${x.has_data ? bn(x.cum_spent) : "chưa có số"}</title>
   },
 
   async profile(main) {
+    const tab = state.profileTab === "memory" && state.user.can_use_ai ? "memory" : "info";
+    state.profileTab = tab;
+    const tabs = [["info", "Thông tin nhân sự"], ...(state.user.can_use_ai ? [["memory", "AI nhớ gì về tôi"]] : [])];
+    main.innerHTML = `${tabs.length > 1 ? `<div class="tabs" id="profile-tabs">${tabs.map(([v, l]) => `<button class="${v === tab ? "active" : ""}" data-tab="${v}">${l}</button>`).join("")}</div>` : ""}<div id="profile-body"></div>`;
+    main.querySelectorAll("#profile-tabs button").forEach((b) => (b.onclick = () => go("profile", { profileTab: b.dataset.tab })));
+    const body = $("#profile-body");
+    await (tab === "memory" ? this.memory(body) : this.profileInfo(body));
+  },
+
+  async profileInfo(main) {
     const data = await api("/api/me/profile");
     const p = data.profile;
     const lr = data.link_request;
@@ -3521,7 +3902,7 @@ const TOOL_LABELS = {
   list_documents: "kho tài liệu",
   search_documents: "tìm trong tài liệu",
   read_document: "nội dung tài liệu",
-  list_targets: "mục tiêu trọng yếu",
+  list_targets: "mục tiêu",
   tao_file: "tạo file",
 };
 
@@ -3620,27 +4001,34 @@ const UNIT_TABS = {
     body.querySelectorAll("[data-del]").forEach((b) => (b.onclick = () => confirmDelete("positions", b.dataset.del, "chức danh này")));
   },
 
-  process(body, u) {
+  // Một khối chung: quy trình và tài liệu cùng một danh sách, có bộ lọc theo loại
+  async docs(body, u) {
+    const canDocs = can("docs_view"), canEdit = can("docs_edit");
+    const [meta, units] = canDocs ? await Promise.all([api("/api/documents/meta"), api("/api/units")]) : [];
+    const procs = u.processes, docs = canDocs ? u.documents : [];
+    const shared = docs.filter((d) => !d.is_owner).length;
+    const procRows = procs.map((p) => `<tr>
+        <td class="doc-main"><span class="doc-title">${esc(p.code || "")} ${esc(p.name)}</span>${p.version ? ` <span class="badge">v${esc(p.version)}</span>` : ""}
+          <div class="doc-meta">${[`Quy trình`, p.owner ? `Chủ trì: ${esc(p.owner)}` : "", p.related_units ? `Phối hợp: ${esc(p.related_units)}` : "",
+            p.iso_clause ? `ISO ${esc(p.iso_clause)}` : "", p.effective_date ? `Hiệu lực ${esc(p.effective_date)}` : ""].filter(Boolean).join(" · ")}</div>
+          ${p.purpose ? `<div class="doc-meta">${esc(p.purpose)}</div>` : ""}
+          ${p.content ? `<details><summary>Các bước & sơ đồ</summary><div class="process-content">${esc(p.content)}</div>${processFlow(p.content) || '<div class="muted">Chưa đủ để vẽ sơ đồ: cần ít nhất 2 bước, mỗi bước một dòng.</div>'}</details>` : ""}</td>
+        <td class="doc-state"><span class="badge ${p.status === "active" ? "ok" : ""}">${PROCESS_STATUS[p.status] || p.status}</span></td>
+        <td class="row-actions doc-acts"><button class="link" data-edit-proc="${p.id}">Sửa</button> · <button class="link danger" data-del-proc="${p.id}">Xoá</button></td></tr>`).join("");
     body.innerHTML = `
-      <div class="toolbar"><h3 style="margin:0">Quy trình vận hành / ISO</h3><button class="primary" id="add-proc">+ Thêm quy trình</button></div>
-      ${u.processes.length ? u.processes.map((p) => `
-        <div class="card" style="margin-bottom:10px">
-          <div class="toolbar">
-            <div><b>${esc(p.code || "")} ${esc(p.name)}</b> <span class="badge">${PROCESS_STATUS[p.status] || p.status}</span>
-              ${p.version ? `<span class="badge">v${esc(p.version)}</span>` : ""}</div>
-            <div><button class="link" data-edit="${p.id}">Sửa</button> · <button class="link danger" data-del="${p.id}">Xoá</button></div>
-          </div>
-          <dl class="kv">
-            ${p.purpose ? `<dt>Mục đích</dt><dd>${esc(p.purpose)}</dd>` : ""}
-            ${p.owner ? `<dt>Chủ trì</dt><dd>${esc(p.owner)}</dd>` : ""}
-            ${p.related_units ? `<dt>Phối hợp</dt><dd>${esc(p.related_units)}</dd>` : ""}
-            ${p.iso_clause ? `<dt>Điều khoản ISO</dt><dd>${esc(p.iso_clause)}</dd>` : ""}
-            ${p.effective_date ? `<dt>Hiệu lực</dt><dd>${esc(p.effective_date)}</dd>` : ""}
-          </dl>
-          ${p.content ? `<details><summary>Nội dung các bước</summary><div class="process-content">${esc(p.content)}</div></details>
-            <details><summary>Sơ đồ các bước</summary>${processFlow(p.content) || '<div class="muted">Chưa đủ để vẽ sơ đồ: cần ít nhất 2 bước, mỗi bước một dòng.</div>'}</details>` : ""}
-        </div>`).join("") : '<div class="empty">Chưa có quy trình. Bấm “Thêm quy trình” để nhập khi có dữ liệu.</div>'}`;
-    const form = (p) => openForm(p.id ? "Sửa quy trình" : "Thêm quy trình", [
+      <div class="toolbar"><div><h3 style="margin:0">Tài liệu</h3>
+        <div class="muted">${procs.length || docs.length ? `${procs.length + docs.length - shared} tài liệu${shared ? ` · ${shared} dùng chung từ phòng ban khác` : ""}` : "Chưa có tài liệu nào"}</div></div>
+        <details class="doc-more add-menu"><summary>${icon("plus")}Thêm tài liệu</summary><div>
+          ${canDocs && canEdit ? `<button class="link" id="up-doc">${icon("upload")}Tải file lên<small>Word, PDF, ảnh scan, quy trình ISO, biểu mẫu...</small></button>
+            <button class="link" id="url-doc">${icon("globe")}Học từ trang web<small>Dán URL, AI đọc và tóm tắt</small></button>
+            <button class="link" id="pick-doc">${icon("plus")}Chọn từ kho có sẵn<small>Dùng chung tài liệu của phòng ban khác</small></button>` : ""}
+          <button class="link" id="add-proc">${icon("edit")}Soạn theo từng bước<small>Gõ nội dung trực tiếp, tự vẽ sơ đồ các bước</small></button></div></details></div>
+      ${procs.length || docs.length ? `
+        ${procs.length ? `<table class="doc-list" id="proc-list">${procRows}</table>` : ""}
+        ${docs.length ? `<div id="doc-list">${docTable(docs, false)}</div>` : ""}`
+        : '<div class="empty">Chưa có tài liệu. Bấm "Thêm tài liệu" để tải lên quy trình, hướng dẫn, biểu mẫu của đơn vị.</div>'}`;
+
+    const procForm = (p) => openForm(p.id ? "Sửa tài liệu" : "Soạn tài liệu theo từng bước", [
       { name: "code", label: "Mã quy trình", placeholder: "VD: QT-HCNS-01" },
       { name: "name", label: "Tên quy trình", required: true },
       { name: "version", label: "Phiên bản" },
@@ -3652,14 +4040,31 @@ const UNIT_TABS = {
       { name: "purpose", label: "Mục đích, phạm vi", type: "textarea" },
       { name: "content", label: "Các bước thực hiện (ai – làm gì – đầu vào – đầu ra – thời hạn)", type: "textarea" },
     ], p, (data) => (p.id ? api(`/api/processes/${p.id}`, { method: "PUT", body: data }) : api("/api/processes", { method: "POST", body: { ...data, unit_id: u.id } })));
-    $("#add-proc").onclick = () => form({});
-    body.querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => form(u.processes.find((p) => p.id == b.dataset.edit))));
-    body.querySelectorAll("[data-del]").forEach((b) => (b.onclick = () => confirmDelete("processes", b.dataset.del, "quy trình này")));
+    $("#add-proc").onclick = () => procForm({});
+    body.querySelectorAll(".add-menu .link").forEach((b) => b.addEventListener("click", () => { b.closest("details").open = false; }));
+    body.querySelectorAll("[data-edit-proc]").forEach((b) => (b.onclick = () => procForm(u.processes.find((p) => p.id == b.dataset.editProc))));
+    body.querySelectorAll("[data-del-proc]").forEach((b) => (b.onclick = () => confirmDelete("processes", b.dataset.delProc, "tài liệu này")));
+
+    if (!canDocs) return;
+    if (canEdit) {
+      $("#up-doc").onclick = () => uploadForm(meta, units, u.id);
+      $("#url-doc").onclick = () => urlLearnForm(units, u.id);
+      $("#pick-doc").onclick = () => linkExistingDocs(u);
+      body.querySelectorAll("[data-unlink-doc]").forEach((b) => (b.onclick = async () => {
+        const id = Number(b.dataset.unlinkDoc), d = await api(`/api/documents/${id}`);
+        try {
+          await api(`/api/documents/${id}`, { method: "PUT", body: { shared_unit_ids: d.shared_unit_ids.filter((x) => x !== u.id) } });
+          render();
+        } catch (e) { toast(e.message, "err"); }
+      }));
+    }
+    bindDocActions(body, meta, units);
+    pollIfProcessing(u.documents);
   },
 
   target(body, u) {
     body.innerHTML = `
-      <div class="toolbar"><h3 style="margin:0">Mục tiêu trọng yếu</h3><button class="primary" id="add-tg">+ Thêm mục tiêu</button></div>
+      <div class="toolbar"><h3 style="margin:0">Mục tiêu</h3><button class="primary" id="add-tg">+ Thêm mục tiêu</button></div>
       ${u.targets.length ? `
         <table>
           <tr><th>Kỳ</th><th>Chỉ tiêu</th><th class="num">Mục tiêu</th><th class="num">Thực hiện</th><th class="num">% đạt</th><th>Ghi chú</th><th></th></tr>
@@ -3696,36 +4101,6 @@ const UNIT_TABS = {
     body.querySelectorAll("[data-del]").forEach((b) => (b.onclick = () => confirmDelete("targets", b.dataset.del, "mục tiêu này")));
   },
 
-  async docs(body, u) {
-    const [meta, units] = await Promise.all([api("/api/documents/meta"), api("/api/units")]);
-    const own = u.documents.filter((d) => d.is_owner), shared = u.documents.filter((d) => !d.is_owner);
-    const section = (title, hint, list) => `<section class="doc-section">
-      <div class="doc-section-head"><b>${title}</b><span class="badge">${list.length}</span><span class="muted">${hint}</span></div>
-      ${docTable(list, false)}</section>`;
-    body.innerHTML = `
-      <div class="toolbar"><div><h3 style="margin:0">Tài liệu của đơn vị</h3>
-        <div class="muted">${u.documents.length ? `${own.length} thuộc đơn vị · ${shared.length} dùng chung từ phòng ban khác` : "Chưa có tài liệu nào"}</div></div>
-        ${can("docs_edit") ? `<div><button class="ghost" id="pick-doc">${icon("plus")}Thêm tài liệu có sẵn</button>${DOC_ACTIONS}</div>` : ""}</div>
-      ${u.documents.length ? `
-        ${own.length ? section("Của đơn vị", "đơn vị này là chủ quản", own) : ""}
-        ${shared.length ? section("Dùng chung từ phòng ban khác", "chỉ gỡ khỏi đơn vị này, không xoá tài liệu gốc", shared) : ""}`
-        : '<div class="empty">Chưa có tài liệu. Tải lên quy trình ISO, hướng dẫn, biểu mẫu của đơn vị, hoặc thêm tài liệu đã có trong thư viện.</div>'}`;
-    if (can("docs_edit")) {
-      $("#up-doc").onclick = () => uploadForm(meta, units, u.id);
-      $("#url-doc").onclick = () => urlLearnForm(units, u.id);
-      $("#pick-doc").onclick = () => linkExistingDocs(u);
-      body.querySelectorAll("[data-unlink-doc]").forEach((b) => (b.onclick = async () => {
-        const id = Number(b.dataset.unlinkDoc), d = await api(`/api/documents/${id}`);
-        try {
-          await api(`/api/documents/${id}`, { method: "PUT", body: { shared_unit_ids: d.shared_unit_ids.filter((x) => x !== u.id) } });
-          render();
-        } catch (e) { toast(e.message, "err"); }
-      }));
-    }
-    bindDocActions(body, meta, units);
-    pollIfProcessing(u.documents);
-  },
-
   info(body, u) {
     body.innerHTML = `
       <dl class="kv">
@@ -3737,6 +4112,10 @@ const UNIT_TABS = {
       </dl>`;
   },
 };
+for (const v of Object.keys(SECTION_TABS)) {  // các trang gộp chung một mục thanh bên: thêm thanh tab phía trên, kể cả khi trang tự vẽ lại
+  const draw = VIEWS[v];
+  VIEWS[v] = async (main, ...args) => { await draw.call(VIEWS, main, ...args); sectionTabs(main, v); };
+}
 
 // ---------------- Form đơn vị / nhân sự ----------------
 function unitForm(units, u) {
@@ -3912,7 +4291,7 @@ const isUnreviewed = (d) => needsReview(d);  // PDF scan do AI đọc, chưa đ�
 
 // Khung chữ khi đối chiếu: sửa thẳng trên bản đã dựng (contenteditable); tab "Markdown" là ô mã gốc #rv-text, nguồn dữ liệu khi lưu.
 // Chỉ đổi HTML ngược về markdown khi người duyệt thật sự gõ (dirty), để bản chưa sửa giữ nguyên từng ký tự.
-const rvRender = (text) => window.marked ? marked.parse(esc(text).replace(/&gt;/g, ">"), { breaks: true }).replace(/<li><\/li>/g, "<li><br></li>") : `<pre>${esc(text)}</pre>`;
+const rvRender = (text) => window.marked ? marked.parse(esc(text.replace(/(?:&nbsp;| )+/gi, " ")).replace(/&gt;/g, ">"), { breaks: true }).replace(/<li><\/li>/g, "<li><br></li>") : `<pre>${esc(text)}</pre>`;
 let rvTd;
 function rvToMd(html) {
   if (!rvTd) {
@@ -4352,3 +4731,41 @@ function urlLearnForm(units, unitId) {
   modal.addEventListener("close", () => { discard(); ok.textContent = "Lưu"; }, { once: true });
   modal.showModal();
 }
+
+// ---------- Điện thoại: bảng nhiều cột hiển thị dạng thẻ ----------
+// Gắn nhãn cột (data-label) cho từng ô theo hàng tiêu đề; CSS (styles.css, "table.rt") đổi thành thẻ khi màn hình hẹp.
+// Bảng có tiêu đề hai tầng/rowspan, bảng trong câu trả lời AI hoặc bảng đã có giao diện riêng thì giữ nguyên.
+(function responsiveTables() {
+  const SKIP = ".msg, .rv-view, .hist-table, .no-rt, table.mini";
+  const tag = (table) => {
+    if (table.dataset.rt || table.closest(SKIP) || table.querySelector("[rowspan]")) return;
+    const headRow = [...table.rows].find((r) => r.cells.length && [...r.cells].every((c) => c.tagName === "TH"));
+    if (!headRow) return;
+    const labels = [];
+    for (const th of headRow.cells) {
+      const text = th.textContent.replace(/\s+/g, " ").trim();
+      for (let i = 0; i < (th.colSpan || 1); i++) labels.push(text);
+    }
+    if (labels.length < 3) return;  // bảng 2 cột vẫn đọc tốt như cũ
+    table.dataset.rt = "1";
+    table.classList.add("rt");
+    headRow.classList.add("rt-head");
+    for (const tr of table.rows) {
+      if (tr === headRow) continue;
+      let col = 0;
+      for (const td of tr.cells) {
+        if ((td.colSpan || 1) === 1) {
+          const label = labels[col] || "";
+          if (label && col > 0) td.dataset.label = label;
+          if (col === 0) td.classList.add("rt-first");
+        } else td.classList.add("rt-wide");
+        col += td.colSpan || 1;
+      }
+    }
+  };
+  let queued = false;
+  const run = () => { queued = false; document.querySelectorAll("#main table:not([data-rt]), #modal table:not([data-rt])").forEach(tag); };
+  const obs = new MutationObserver(() => { if (!queued) { queued = true; requestAnimationFrame(run); } });
+  for (const id of ["main", "modal"]) { const el = document.getElementById(id); if (el) obs.observe(el, { childList: true, subtree: true }); }
+  run();
+})();

@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap">
-  <link rel="stylesheet" href="/static/styles.css?v=56">
+  <link rel="stylesheet" href="/static/styles.css?v=65">
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/turndown@7.2.0/dist/turndown.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/turndown-plugin-gfm@1.0.2/dist/turndown-plugin-gfm.js"></script>
@@ -22,27 +22,23 @@
       </button>
       <div class="side-app">Brain · Tri thức điều hành</div>
     </div>
-    <nav id="nav">
+    <nav id="nav" aria-label="Điều hướng chính">
       <div class="nav-group">Điều hành</div>
-      <button data-view="overview" class="active"><svg data-icon="home"></svg><span>Tổng quan</span></button>
-      <button data-view="chart"><svg data-icon="org"></svg><span>Sơ đồ tổ chức</span></button>
-      <button data-view="units"><svg data-icon="building"></svg><span>Phòng ban</span></button>
-      <button data-view="people"><svg data-icon="users"></svg><span>Nhân sự</span></button>
-      <button data-view="targets"><svg data-icon="chart"></svg><span>Mục tiêu trọng yếu</span></button>
-      <button data-view="budget"><svg data-icon="layers"></svg><span>Ngân sách</span></button>
-      <button data-view="proposals"><svg data-icon="spark"></svg><span>Đề xuất</span></button>
+      <a class="active" aria-current="page" href="/" data-view="overview"><svg data-icon="home"></svg><span>Tổng quan</span></a>
+      <a href="/muc-tieu-doanh-thu" data-view="targets"><svg data-icon="target"></svg><span>Mục tiêu</span></a>
+      <a href="/ngan-sach" data-view="budget"><svg data-icon="wallet"></svg><span>Ngân sách</span></a>
+      <a href="/de-xuat" data-view="proposals"><svg data-icon="bulb"></svg><span>Đề xuất</span><em class="nav-count" id="proposals-badge" hidden></em></a>
+      <div class="nav-group">Tổ chức</div>
+      <a href="/so-do-to-chuc" data-view="chart"><svg data-icon="org"></svg><span>Sơ đồ tổ chức</span></a>
+      <a href="/phong-ban" data-view="units"><svg data-icon="building"></svg><span>Phòng ban</span></a>
+      <a href="/nhan-su" data-view="people"><svg data-icon="users"></svg><span>Nhân sự</span></a>
       <div class="nav-group">Tri thức</div>
-      <button data-view="docs"><svg data-icon="file"></svg><span>Tài liệu</span></button>
-      <button data-view="insights"><svg data-icon="chart"></svg><span>Phân tích</span></button>
-      <button data-view="chat"><svg data-icon="spark"></svg><span>Trợ lý AI</span><em class="nav-tag">AI</em></button>
-      <button data-view="myfiles"><svg data-icon="upload"></svg><span>Dữ liệu của tôi</span></button>
-      <button data-view="profile"><svg data-icon="users"></svg><span>Hồ sơ của tôi</span><em class="nav-tag" id="profile-badge" hidden></em></button>
-      <button data-view="memory"><svg data-icon="shield"></svg><span>AI nhớ gì về tôi</span></button>
+      <a href="/tai-lieu" data-view="docs"><svg data-icon="file"></svg><span>Tài liệu</span></a>
+      <a href="/phan-tich" data-view="insights"><svg data-icon="chart"></svg><span>Phân tích</span></a>
+      <a href="/tro-ly-ai" data-view="chat"><svg data-icon="spark"></svg><span>Trợ lý AI</span><em class="nav-tag">AI</em></a>
       <div class="nav-group">Hệ thống</div>
-      <button data-view="history"><svg data-icon="file"></svg><span>Lịch sử thay đổi</span></button>
-      <button data-view="aicost"><svg data-icon="chart"></svg><span>Chi phí AI</span></button>
-      <button data-view="users"><svg data-icon="shield"></svg><span>Tài khoản</span><em class="nav-tag" id="users-badge" hidden></em></button>
-      <button data-view="access"><svg data-icon="key"></svg><span>Quyền truy cập</span><em class="nav-tag" id="access-badge" hidden></em></button>
+      <a href="/tai-khoan" data-view="users"><svg data-icon="idcard"></svg><span>Người dùng &amp; quyền</span><em class="nav-count" id="users-badge" hidden></em></a>
+      <a href="/lich-su-thay-doi" data-view="history"><svg data-icon="clock"></svg><span>Nhật ký &amp; chi phí</span></a>
     </nav>
     <div class="side-foot"><div id="userbox"></div><div class="copy">© Công ty Cổ phần AZB</div></div>
   </aside>
@@ -67,6 +63,6 @@
     </form>
   </dialog>
 
-  <script src="/static/app.js?v=64"></script>
+  <script src="/static/app.js?v=73"></script>
 </body>
 </html>

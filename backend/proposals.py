@@ -1,6 +1,6 @@
 """Đề xuất cải tiến: giao việc, tiến trình có quy tắc, file đính kèm và nghiệm thu.
 
-Vòng đời: Mới → Đã duyệt → Đang thực hiện → Chờ nghiệm thu → Hoàn thành (hoặc Không thực hiện, kèm lý do).
+Vòng đời: Mới → Đang thực hiện → Chờ nghiệm thu → Hoàn thành (hoặc Không thực hiện, kèm lý do).
 Ban TGĐ / quản trị duyệt, giao việc và nghiệm thu; người phụ trách (một tài khoản) cập nhật tiến độ, tải
 kết quả và báo hoàn thành. Chuyển sang "Chờ nghiệm thu" / "Hoàn thành" phải có ít nhất một file kết quả.
 """
@@ -12,20 +12,23 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from . import auth, documents
+from . import access, auth, documents
 from .db import row, rows
 
-STATUS = {"new": "Mới", "approved": "Đã duyệt", "in_progress": "Đang thực hiện", "review": "Chờ nghiệm thu",
+STATUS = {"new": "Mới", "in_progress": "Đang thực hiện", "review": "Chờ nghiệm thu",
           "done": "Hoàn thành", "dropped": "Không thực hiện"}
 PRIORITY = {"high": "Cao", "normal": "Thường", "low": "Thấp"}
 # Trạng thái được chuyển tới từ mỗi trạng thái (Ban TGĐ); người phụ trách chỉ dùng ASSIGNEE_MOVES
-NEXT = {"new": {"approved", "dropped"}, "approved": {"in_progress", "dropped"},
+NEXT = {"new": {"in_progress", "dropped"},
         "in_progress": {"review", "done", "dropped"}, "review": {"done", "in_progress", "dropped"},
         "done": {"in_progress"}, "dropped": {"new"}}
-ASSIGNEE_MOVES = {("approved", "in_progress"), ("in_progress", "review")}
+ASSIGNEE_MOVES = {("in_progress", "review")}
 NEED_RESULT = {"review", "done"}
 FILE_KINDS = {"ref": "Tài liệu tham chiếu", "result": "Kết quả / bằng chứng"}
-OPEN_STATUS = ("new", "approved", "in_progress", "review")
+OPEN_STATUS = ("new", "in_progress", "review")
+STALE_REVIEW_DAYS = 3  # chờ nghiệm thu quá số ngày này thì nhắc Ban TGĐ
+# Thời điểm đề xuất được báo hoàn thành (lần chuyển sang "Chờ nghiệm thu" gần nhất)
+REVIEW_SINCE = "(SELECT MAX(e.at) FROM proposal_events e WHERE e.proposal_id = p.id AND e.to_status = 'review')"
 
 
 def is_boss(user: dict) -> bool:
@@ -63,6 +66,9 @@ def _decorate(p: dict, user: dict, results: int) -> dict:
     today = date.today().isoformat()
     p["overdue"] = bool(p["due_date"] and p["due_date"] < today and p["status"] in OPEN_STATUS)
     p["result_files"] = results
+    since = p.get("review_since")
+    p["review_days"] = (date.today() - date.fromisoformat(since[:10])).days if p["status"] == "review" and since else None
+    p["review_stale"] = p["review_days"] is not None and p["review_days"] >= STALE_REVIEW_DAYS
     p["moves"] = [s for s in STATUS if _can_move(user, p, s)]
     p["can_assign"] = is_boss(user)
     return p
@@ -79,7 +85,7 @@ def list_proposals(conn, user: dict, status: str | None = None, mine: bool = Fal
     if status in STATUS:
         where.append("p.status = ?")
         args.append(status)
-    sql = ("SELECT p.*, u.full_name AS author, o.full_name AS owner_name,"
+    sql = (f"SELECT p.*, {REVIEW_SINCE} AS review_since, u.full_name AS author, o.full_name AS owner_name,"
            " (SELECT COUNT(*) FROM proposal_files f WHERE f.proposal_id = p.id) AS file_count,"
            " (SELECT COUNT(*) FROM proposal_files f WHERE f.proposal_id = p.id AND f.kind = 'result') AS result_count"
            " FROM proposals p LEFT JOIN users u ON u.id = p.created_by LEFT JOIN users o ON o.id = p.owner_user_id")
@@ -92,12 +98,15 @@ def list_proposals(conn, user: dict, status: str | None = None, mine: bool = Fal
 
 def detail(conn, user: dict, pid: int) -> dict:
     p = _get(conn, user, pid)
+    p["review_since"] = conn.execute("SELECT " + REVIEW_SINCE.replace("p.id", "?"), (pid,)).fetchone()[0]
     p["author"] = (row(conn, "SELECT full_name FROM users WHERE id = ?", (p["created_by"],)) or {}).get("full_name")
     p["owner_name"] = (row(conn, "SELECT full_name FROM users WHERE id = ?", (p["owner_user_id"],)) or {}).get("full_name")
     p["events"] = rows(conn, "SELECT e.*, u.full_name AS by_name FROM proposal_events e LEFT JOIN users u ON u.id = e.user_id"
                              " WHERE e.proposal_id = ? ORDER BY e.id", (pid,))
-    p["files"] = rows(conn, "SELECT f.id, f.kind, f.filename, f.size_bytes, f.uploaded_at, f.uploaded_by, u.full_name AS by_name"
+    p["files"] = rows(conn, "SELECT f.id, f.kind, f.filename, f.size_bytes, f.uploaded_at, f.uploaded_by, f.doc_id, u.full_name AS by_name"
                             " FROM proposal_files f LEFT JOIN users u ON u.id = f.uploaded_by WHERE f.proposal_id = ? ORDER BY f.id", (pid,))
+    p["files"] = [{**f, "archived": bool(f["doc_id"])} for f in p["files"]]
+    p["can_archive"] = is_boss(user) and p["status"] == "done" and any(f["kind"] == "result" and not f["doc_id"] for f in p["files"])
     return _decorate(p, user, sum(f["kind"] == "result" for f in p["files"]))
 
 
@@ -143,8 +152,8 @@ def update(conn, user: dict, pid: int, fields: dict) -> dict:
             _fail("Cần ghi lý do khi chọn Không thực hiện")
         if to in NEED_RESULT and not _result_count(conn, pid):
             _fail("Cần tải lên ít nhất một file kết quả / bằng chứng trước khi báo hoàn thành")
-        if to in ("approved", "in_progress") and not (p["owner_user_id"] or fields.get("owner_user_id")):
-            _fail("Cần giao cho một người phụ trách trước khi duyệt")
+        if to == "in_progress" and p["status"] == "new" and not (p["owner_user_id"] or fields.get("owner_user_id")):
+            _fail("Cần giao cho một người phụ trách trước khi bắt đầu thực hiện")
         sets["status"] = to
 
     if any(k in fields for k in ("owner_user_id", "due_date", "priority", "note")):
@@ -231,7 +240,50 @@ def delete_file(conn, user: dict, pid: int, fid: int) -> None:
         shutil.move(str(src), str(trash / src.name))
 
 
+def archive_results(conn, user: dict, pid: int, level: str = access.DEFAULT_LEVEL) -> list[int]:
+    """Sau nghiệm thu: sao chép các file kết quả chưa lưu vào kho tài liệu (AI đọc được, lọc theo độ mật).
+    File gốc vẫn giữ ở đề xuất. Trả về id tài liệu mới để chạy trích xuất nội dung nền."""
+    if not is_boss(user):
+        _fail("Chỉ Ban TGĐ / quản trị được lưu kết quả vào kho tài liệu", 403)
+    p = _get(conn, user, pid)
+    if p["status"] != "done":
+        _fail("Chỉ lưu vào kho tài liệu sau khi đã nghiệm thu hoàn thành")
+    access.check_level(user, level)
+    files = rows(conn, "SELECT * FROM proposal_files WHERE proposal_id = ? AND kind = 'result' AND doc_id IS NULL ORDER BY id", (pid,))
+    files = [f for f in files if Path(f["stored_path"]).is_file()]
+    if not files:
+        _fail("Không có file kết quả nào chưa được lưu vào kho")
+    doc_ids = []
+    for f in files:
+        stem = f["filename"].rsplit(".", 1)[0]
+        doc_id = conn.execute(
+            "INSERT INTO documents (title, doc_type, filename, stored_path, size_bytes, uploaded_by, access_level)"
+            " VALUES (?, 'khac', ?, '', ?, ?, ?)",
+            (f"{p['title'][:120]} — {stem}"[:200], f["filename"], f["size_bytes"], user["id"], level)).lastrowid
+        dest = documents.UPLOAD_DIR / f"{doc_id}_{documents.safe_filename(f['filename'])}"
+        shutil.copy2(f["stored_path"], dest)
+        conn.execute("UPDATE documents SET stored_path = ? WHERE id = ?", (str(dest), doc_id))
+        conn.execute("UPDATE proposal_files SET doc_id = ? WHERE id = ?", (doc_id, f["id"]))
+        doc_ids.append(doc_id)
+    _event(conn, pid, user, "archive", note=f"Lưu {len(doc_ids)} file kết quả vào kho tài liệu ({access.LEVELS[level]})")
+    return doc_ids
+
+
+def stale_review_count(conn: sqlite3.Connection) -> int:
+    """Số đề xuất chờ nghiệm thu từ STALE_REVIEW_DAYS ngày trở lên (nhắc Ban TGĐ)."""
+    return conn.execute(
+        f"SELECT COUNT(*) FROM proposals p WHERE p.status = 'review' AND date({REVIEW_SINCE}) <= date('now','localtime', ?)",
+        (f"-{STALE_REVIEW_DAYS} days",)).fetchone()[0]
+
+
+def pending_count(conn: sqlite3.Connection, user: dict) -> int:
+    """Số đề xuất đang chờ chính user xử lý (hiện badge trên menu): Ban TGĐ chờ duyệt/nghiệm thu, người phụ trách chờ làm."""
+    if is_boss(user):
+        return conn.execute("SELECT COUNT(*) FROM proposals WHERE status IN ('new','review')").fetchone()[0]
+    return open_assigned_count(conn, user["id"])
+
+
 def open_assigned_count(conn: sqlite3.Connection, user_id: int) -> int:
     """Số đề xuất đang giao cho user mà chưa xong (hiện trên menu)."""
-    return conn.execute("SELECT COUNT(*) FROM proposals WHERE owner_user_id = ? AND status IN ('approved','in_progress')",
+    return conn.execute("SELECT COUNT(*) FROM proposals WHERE owner_user_id = ? AND status = 'in_progress'",
                         (user_id,)).fetchone()[0]

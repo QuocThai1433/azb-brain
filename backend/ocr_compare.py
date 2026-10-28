@@ -29,20 +29,14 @@ IMAGE_PROMPT = (
 EST_CLAUDE_IN_PER_PAGE = int(os.environ.get("AZB_EST_CLAUDE_IN_PER_PAGE", "2500"))
 EST_GEMINI_IN_PER_PAGE = int(os.environ.get("AZB_EST_GEMINI_IN_PER_PAGE", "1000"))
 EST_OUT_PER_PAGE = int(os.environ.get("AZB_EST_OUT_PER_PAGE", "900"))
-# Giá Gemini lấy từ trang tổng hợp bên thứ ba, chưa đối chiếu trang giá chính thức: chỉnh bằng AZB_PRICE_GEMINI=in,out
-_GEMINI_PRICE_DEFAULT = (0.50, 3.00)
-
-
 def gemini_price() -> tuple[float, float]:
-    try:
-        p_in, p_out = (float(x) for x in os.environ.get("AZB_PRICE_GEMINI", "").split(","))
-        return p_in, p_out
-    except ValueError:
-        return _GEMINI_PRICE_DEFAULT
+    from .ai import gemini_price as price  # dùng chung giá với OCR chính (AZB_PRICE_GEMINI)
+    return price()
 
 
 def gemini_model() -> str:
-    return os.environ.get("AZB_GEMINI_OCR_MODEL") or os.environ.get("AZB_GEMINI_MODEL", "gemini-3.8-flash")
+    from .ai import gemini_ocr_model
+    return gemini_ocr_model()
 
 
 # ---------------- Chuẩn bị file ----------------

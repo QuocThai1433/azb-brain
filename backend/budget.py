@@ -86,6 +86,14 @@ def report(conn: sqlite3.Connection, days: int = 7) -> dict:
     by_user = conn.execute(f"SELECT t.user_id, COALESCE(u.full_name, u.username, 'Hệ thống / việc nền') AS name, COUNT(*) AS calls,"
                            f" ROUND(COALESCE(SUM(t.cost_usd),0), 4) AS cost_usd FROM ({both}) t"
                            f" LEFT JOIN users u ON u.id = t.user_id GROUP BY t.user_id ORDER BY SUM(t.cost_usd) DESC", args).fetchall()
+    # Từng lượt gọi mới nhất trước (chat kèm câu hỏi, việc nền kèm nhãn); token vào gồm cả token cache như log_cost
+    recent = conn.execute(
+        "SELECT ts, 'chat' AS kind, SUBSTR(question, 1, 120) AS label, model,"
+        " COALESCE(input_tokens,0) + COALESCE(cache_read_tokens,0) + COALESCE(cache_write_tokens,0) AS input_tokens,"
+        " COALESCE(output_tokens,0) AS output_tokens, cost_usd, user_id FROM ai_query_log"
+        " WHERE model IS NOT NULL AND date(ts) >= date('now','localtime',?)"
+        " UNION ALL SELECT ts, kind, SUBSTR(label, 1, 120), model, COALESCE(input_tokens,0), COALESCE(output_tokens,0), cost_usd, user_id"
+        " FROM ai_usage_log WHERE date(ts) >= date('now','localtime',?) ORDER BY ts DESC LIMIT 200", args).fetchall()
     total = round(sum(r[4] or 0 for r in daily), 4)
     everything = ("SELECT date(ts) AS day, input_tokens, output_tokens, cost_usd FROM ai_query_log WHERE model IS NOT NULL"
                   " UNION ALL SELECT date(ts), input_tokens, output_tokens, cost_usd FROM ai_usage_log")
@@ -97,7 +105,8 @@ def report(conn: sqlite3.Connection, days: int = 7) -> dict:
             "daily_limit_usd": DAILY_BUDGET_USD, "user_limit_usd": USER_DAILY_BUDGET_USD,
             "daily": [dict(zip(("day", "calls", "input_tokens", "output_tokens", "cost_usd"), r)) for r in daily],
             "by_kind": [dict(zip(("kind", "model", "calls", "cost_usd"), r)) for r in by_kind],
-            "by_user": [dict(zip(("user_id", "name", "calls", "cost_usd"), r)) for r in by_user]}
+            "by_user": [dict(zip(("user_id", "name", "calls", "cost_usd"), r)) for r in by_user],
+            "recent": [dict(zip(("ts", "kind", "label", "model", "input_tokens", "output_tokens", "cost_usd", "user_id"), r)) for r in recent]}
 
 
 def check(conn: sqlite3.Connection, user: dict) -> str | None:

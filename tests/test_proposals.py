@@ -1,4 +1,4 @@
-"""Đề xuất cải tiến (API): người tạo chỉ thấy đề xuất của mình; Ban TGĐ/quản trị xem tất cả và đổi tiến trình; viewer không tạo được.
+"""Đề xuất cải tiến (API): người tạo chỉ thấy đề xuất của mình; Ban TGĐ/quản trị xem tất cả và đổi tiến trình; ai đăng nhập cũng tạo được.
 Quy tắc vòng đời, file đính kèm: xem tests/test_proposal_workflow.py."""
 import tempfile
 import unittest
@@ -40,18 +40,25 @@ class ProposalsTest(unittest.TestCase):
         self.assertEqual([p["title"] for p in mine], ["Của A"])
         self.assertEqual(len(self.clients["ceo"].get("/api/proposals").json()), 2)
 
-    def test_viewer_cannot_create_and_sees_nothing(self):
+    def test_viewer_creates_own_but_sees_only_own(self):
         self.clients["manager"].post("/api/proposals", json={"title": "Của A"})
         self.assertEqual(self.clients["viewer"].get("/api/proposals").json(), [])  # chỉ thấy đề xuất của mình / được giao
-        self.assertEqual(self.clients["viewer"].post("/api/proposals", json={"title": "x"}).status_code, 403)
+        r = self.clients["viewer"].post("/api/proposals", json={"title": "Của viewer"})  # không cần quyền AI để tự nhập đề xuất
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual([p["title"] for p in self.clients["viewer"].get("/api/proposals").json()], ["Của viewer"])
+        self.assertEqual(self.clients["manager"].get(f"/api/proposals/{r.json()['id']}").status_code, 404)
+
+    def test_archive_endpoint_only_for_boss(self):
+        pid = self.clients["viewer"].post("/api/proposals", json={"title": "x"}).json()["id"]
+        self.assertEqual(self.clients["viewer"].post(f"/api/proposals/{pid}/archive", json={}).status_code, 403)
 
     def test_only_ceo_changes_status_and_owner(self):
         pid = self.clients["manager"].post("/api/proposals", json={"title": "x"}).json()["id"]
-        self.assertEqual(self.clients["manager"].put(f"/api/proposals/{pid}", json={"status": "approved"}).status_code, 403)
+        self.assertEqual(self.clients["manager"].put(f"/api/proposals/{pid}", json={"status": "in_progress"}).status_code, 403)
         self.assertEqual(self.clients["manager"].put(f"/api/proposals/{pid}", json={"owner_user_id": 3}).status_code, 403)
-        r = self.clients["ceo"].put(f"/api/proposals/{pid}", json={"owner_user_id": 3, "note": "Giao HCNS làm", "status": "approved"})
+        r = self.clients["ceo"].put(f"/api/proposals/{pid}", json={"owner_user_id": 3, "note": "Giao HCNS làm", "status": "in_progress"})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual((r.json()["status"], r.json()["owner_user_id"], r.json()["note"]), ("approved", 3, "Giao HCNS làm"))
+        self.assertEqual((r.json()["status"], r.json()["owner_user_id"], r.json()["note"]), ("in_progress", 3, "Giao HCNS làm"))
 
     def test_invalid_status_and_empty_title_are_refused(self):
         pid = self.clients["manager"].post("/api/proposals", json={"title": "x"}).json()["id"]

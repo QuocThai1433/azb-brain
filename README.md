@@ -31,7 +31,7 @@ Nhập danh sách nhân sự HCNS (cập nhật hằng tuần, khớp theo mã N
 ## Bảo mật trợ lý AI
 - **AI chỉ đọc**: AI chỉ có các công cụ tra cứu, chạy trên kết nối database `query_only` – không gửi email, xoá hay sửa dữ liệu/file gốc được, kể cả khi tài liệu chứa lệnh độc hại.
 - **Chống prompt injection** (`backend/guard.py`): nội dung tài liệu là dữ liệu không đáng tin; ký tự ẩn bị xoá, câu giống "bỏ qua hướng dẫn..." bị vô hiệu hoá + cảnh báo (cả lúc tải lên và lúc AI đọc); ảnh/link markdown ra ngoài trong câu trả lời bị bỏ.
-- **Độ mật tài liệu** (`backend/access.py`): Công khai / Nội bộ / Hạn chế (theo đơn vị) / Mật (chỉ admin, ceo). Lọc theo quyền người hỏi TRƯỚC khi đưa cho AI, và áp dụng cho cả danh sách/tìm kiếm/tải file. Tài liệu cũ mặc định "Nội bộ", tài liệu website "Công khai". Mục tiêu trọng yếu (doanh số, doanh thu, lợi nhuận, dòng tiền, OKRs dự án) chỉ xem được với đơn vị mình quản lý.
+- **Độ mật tài liệu** (`backend/access.py`): Công khai / Nội bộ / Hạn chế (theo đơn vị) / Mật (chỉ admin, ceo). Lọc theo quyền người hỏi TRƯỚC khi đưa cho AI, và áp dụng cho cả danh sách/tìm kiếm/tải file. Tài liệu cũ mặc định "Nội bộ", tài liệu website "Công khai". Mục tiêu (doanh số, doanh thu, lợi nhuận, dòng tiền, OKRs dự án) chỉ xem được với đơn vị mình quản lý.
 - **Dữ liệu cá nhân** (ngày sinh, mã NV, hợp đồng, SĐT, email, ghi chú nhân sự) không gửi cho nhà cung cấp AI.
 - **Nhật ký**: mọi câu hỏi AI ghi vào `ai_query_log` (admin xem tại `GET /api/ai/audit`, `?flagged_only=true` để lọc cảnh báo). Giới hạn 8 câu/phút và 300 câu/ngày mỗi tài khoản.
 - **Sao lưu**: tự động mỗi 24 giờ (database + bản sao file gốc, giữ 14 bản). Admin: `GET/POST /api/admin/backups`. Đặt `AZB_BACKUP_DIR` sang ổ khác. Xoá tài liệu chỉ chuyển file vào `data/uploads/_trash`.

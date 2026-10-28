@@ -82,6 +82,22 @@ CREATE TABLE IF NOT EXISTS targets (
     updated_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+-- Chương trình hành động (POA) của công ty theo năm, đi kèm bộ mục tiêu WIG/KRI
+CREATE TABLE IF NOT EXISTS action_programs (
+    id         INTEGER PRIMARY KEY,
+    year       TEXT NOT NULL,          -- VD: 2026
+    code       TEXT,                   -- VD: POA 01
+    name       TEXT NOT NULL,
+    owner      TEXT,                   -- đơn vị phụ trách (văn bản tự do: Ban Dự án, Toàn công ty...)
+    start_date TEXT,                   -- YYYY-MM-DD
+    end_date   TEXT,
+    status     TEXT NOT NULL DEFAULT 'doing',  -- planned | doing | done | paused
+    progress   REAL,                   -- % hoàn thành, NULL = chưa cập nhật
+    notes      TEXT,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id        INTEGER PRIMARY KEY,
     ts        TEXT NOT NULL DEFAULT (datetime('now','localtime')),
@@ -305,7 +321,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     id          INTEGER PRIMARY KEY,
     title       TEXT NOT NULL,
     body        TEXT,
-    status      TEXT NOT NULL DEFAULT 'new',  -- new | approved | in_progress | done | dropped
+    status      TEXT NOT NULL DEFAULT 'new',  -- new | in_progress | review | done | dropped
     owner       TEXT,                         -- người/bộ phận phụ trách thực hiện
     note        TEXT,                         -- ghi chú của Ban TGĐ
     created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -426,6 +442,7 @@ MIGRATIONS = [
     "ALTER TABLE proposals ADD COLUMN owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL",  # người phụ trách (tài khoản); cột owner giữ tên hiển thị
     "ALTER TABLE proposals ADD COLUMN due_date TEXT",   # hạn hoàn thành (YYYY-MM-DD)
     "ALTER TABLE proposals ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'",  # high | normal | low
+    "ALTER TABLE proposal_files ADD COLUMN doc_id INTEGER REFERENCES documents(id) ON DELETE SET NULL",  # file kết quả đã lưu vào kho tài liệu
 ]
 
 
@@ -469,6 +486,10 @@ def init_db() -> None:
         # owner NULL = "chờ xử lý", chỉ admin/ceo thấy). Chạy lại nhiều lần vẫn an toàn.
         conn.execute("UPDATE documents SET access_level = 'private', owner_id = uploaded_by, unit_id = NULL, process_id = NULL"
                      " WHERE filename LIKE 'anh-dan-%' AND access_level != 'private'")
+        # Bỏ trạng thái đề xuất "Đã duyệt" (giao việc = duyệt): việc đã duyệt chuyển thành đang thực hiện, giữ lịch sử.
+        conn.execute("UPDATE proposals SET status = 'in_progress' WHERE status = 'approved'")
+        conn.execute("UPDATE proposal_events SET from_status = 'in_progress' WHERE from_status = 'approved'")
+        conn.execute("UPDATE proposal_events SET to_status = 'in_progress' WHERE to_status = 'approved'")
 
 
 def rows(conn: sqlite3.Connection, sql: str, params=()) -> list[dict]:

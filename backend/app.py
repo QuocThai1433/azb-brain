@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import access, ai, analytics, auditlog, auth, backup, budget, contacts, documents, export, guard, hr_import, memory, offboarding, opbudget, privatefiles, proposals, selfinfo, semantic, webimport
+from . import access, ai, analytics, auditlog, auth, backup, budget, contacts, documents, export, guard, hr_import, memory, ocr_autoretry, offboarding, opbudget, overview, privatefiles, proposals, selfinfo, semantic, webimport
 from .db import connect, init_db, row, rows
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
@@ -35,10 +35,11 @@ WRITABLE = {
     "processes": ["unit_id", "code", "name", "version", "iso_clause", "owner", "related_units", "purpose", "content",
                   "status", "effective_date"],
     "targets": ["unit_id", "period", "metric", "metric_name", "target_value", "actual_value", "unit_label", "notes"],
+    "action_programs": ["year", "code", "name", "owner", "start_date", "end_date", "status", "progress", "notes", "sort_order"],
 }
-TOUCH_UPDATED = {"processes", "targets"}
+TOUCH_UPDATED = {"processes", "targets", "action_programs"}
 # Bảng chỉ admin/ceo được ghi; các bảng còn lại ghi theo phạm vi đơn vị (manager sửa được đơn vị mình)
-EXEC_ONLY_TABLES = {"employees"}
+EXEC_ONLY_TABLES = {"employees", "action_programs"}
 PUBLIC_API = {"/api/auth/state", "/api/auth/login", "/api/auth/setup", "/api/auth/register", "/api/auth/units"}
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -65,6 +66,7 @@ def _startup() -> None:
     backup.start_scheduler()  # sao lưu database + file gốc định kỳ (xem backend/backup.py)
     memory.start_scheduler()  # trích ghi chú cá nhân từ các đoạn chat đã dừng (chỉ cho người dùng đã bật bộ nhớ)
     semantic.start_scheduler()  # vector tìm theo ý nghĩa cho tài liệu (chỉ khi có GEMINI_API_KEY)
+    ocr_autoretry.start_scheduler()  # tự đọc lại file lỗi OCR tạm thời (AI quá tải/hết hạn mức), xem backend/ocr_autoretry.py
 
 
 @app.middleware("http")
@@ -144,6 +146,8 @@ def auth_state(request: Request):
                 user["pending_requests"] = conn.execute(
                     "SELECT COUNT(*) FROM access_requests WHERE user_id = ? AND seen_by_user = 0", (user["id"],)).fetchone()[0]
             user["proposals_assigned"] = proposals.open_assigned_count(conn, user["id"])  # việc được giao: hiện mục Đề xuất cả khi không có quyền AI
+            user["proposals_pending"] = proposals.pending_count(conn, user)  # badge trên mục Đề xuất
+            user["proposals_stale"] = proposals.stale_review_count(conn) if proposals.is_boss(user) else 0  # chờ nghiệm thu quá lâu
     return {"needs_setup": needs_setup, "user": user, "roles": auth.ROLES}
 
 
@@ -825,6 +829,15 @@ def list_targets(request: Request, unit_id: int | None = None):
         return rows(conn, sql + " ORDER BY t.period DESC, u.sort_order")
 
 
+@app.get("/api/action-programs")
+def list_action_programs(year: str | None = None):
+    """Chương trình hành động của công ty (không phải số liệu tài chính nên mọi tài khoản đăng nhập đều xem được)."""
+    with connect() as conn:
+        if year:
+            return rows(conn, "SELECT * FROM action_programs WHERE year = ? ORDER BY sort_order, code, id", (year,))
+        return rows(conn, "SELECT * FROM action_programs ORDER BY year DESC, sort_order, code, id")
+
+
 class ProposalIn(BaseModel):
     title: str
     body: str = ""
@@ -844,6 +857,7 @@ def proposals_meta(request: Request):
     user = auth.current_user(request)
     with connect() as conn:
         return {"status": proposals.STATUS, "priority": proposals.PRIORITY, "file_kinds": proposals.FILE_KINDS,
+                "levels": {k: access.LEVELS[k] for k in access.settable_levels(user)}, "stale_days": proposals.STALE_REVIEW_DAYS,
                 "allowed_ext": sorted(documents.ALLOWED_EXT), "max_mb": documents.MAX_UPLOAD_BYTES // (1024 * 1024),
                 "assignees": proposals.assignees(conn) if proposals.is_boss(user) else []}
 
@@ -858,7 +872,7 @@ def list_proposals(request: Request, status: str | None = None, mine: bool = Fal
 
 @app.post("/api/proposals")
 def create_proposal(req: ProposalIn, request: Request):
-    user = auth.require_ai(request)
+    user = auth.current_user(request)  # mọi tài khoản đã đăng nhập đều đề xuất được; chỉ thấy đề xuất của mình
     with connect() as conn:
         p = proposals.create(conn, user, req.title, req.body)
         _log(conn, user, "create", "proposals", p["id"])
@@ -892,6 +906,23 @@ async def upload_proposal_file(pid: int, request: Request, kind: str = Form("ref
         return proposals.detail(conn, user, pid)
 
 
+class ProposalArchiveIn(BaseModel):
+    access_level: str = access.DEFAULT_LEVEL
+
+
+@app.post("/api/proposals/{pid}/archive")
+def archive_proposal_results(pid: int, req: ProposalArchiveIn, request: Request, background: BackgroundTasks):
+    """Sau nghiệm thu: đưa file kết quả vào kho tài liệu (quyền chi tiết kiểm tra trong proposals.archive_results)."""
+    user = auth.current_user(request)
+    with connect() as conn:
+        doc_ids = proposals.archive_results(conn, user, pid, req.access_level)
+        for d in doc_ids:
+            _log(conn, user, "upload", "documents", d, f"từ đề xuất #{pid}")
+        for d in doc_ids:
+            background.add_task(documents.process_document, d)
+        return proposals.detail(conn, user, pid)
+
+
 @app.get("/api/proposals/{pid}/files/{fid}")
 def download_proposal_file(pid: int, fid: int, request: Request):
     user = auth.current_user(request)
@@ -913,6 +944,7 @@ def delete_proposal_file(pid: int, fid: int, request: Request):
 
 
 HISTORY_NAME_COL = {"units": "name", "employees": "full_name", "positions": "title", "processes": "name",
+                    "action_programs": "COALESCE(code || ' ', '') || name",
                     "targets": "COALESCE(metric_name, metric) || ' ' || period"}  # biểu thức cố định trong mã, không lấy từ người dùng
 
 
@@ -928,10 +960,11 @@ FIELD_LABELS = {
     "owner": "Người phụ trách", "related_units": "Đơn vị liên quan", "purpose": "Mục đích", "content": "Nội dung",
     "effective_date": "Ngày hiệu lực", "period": "Kỳ", "metric": "Chỉ tiêu (mã)", "metric_name": "Chỉ tiêu",
     "target_value": "Mục tiêu", "actual_value": "Thực tế", "unit_label": "Đơn vị tính",
+    "year": "Năm", "start_date": "Bắt đầu", "end_date": "Kết thúc", "progress": "Tiến độ (%)",
 }
 HISTORY_MASK = "(đã ẩn)"
 # Hoàn tác thêm/xoá chỉ cho các bảng không kéo theo dữ liệu con (xoá đơn vị/nhân sự có thể làm mất liên kết)
-UNDO_STRUCTURAL = {"targets", "processes", "positions"}
+UNDO_STRUCTURAL = {"targets", "processes", "positions", "action_programs"}
 
 
 def _history_filter(entity, action, user_id, q, date_from, date_to) -> tuple[str, list]:
@@ -1025,7 +1058,8 @@ def change_history_export(request: Request, entity: str | None = None, action: s
     with connect() as conn:
         page = _history_page(conn, where, params, 20000, 0)
     ACT = {"create": "Thêm mới", "update": "Sửa", "delete": "Xoá"}
-    TBL = {"units": "Đơn vị", "employees": "Nhân sự", "positions": "Chức danh", "processes": "Quy trình", "targets": "Mục tiêu"}
+    TBL = {"units": "Đơn vị", "employees": "Nhân sự", "positions": "Chức danh", "processes": "Quy trình", "targets": "Mục tiêu",
+           "action_programs": "Chương trình hành động"}
 
     def show(field, v):
         if v is None or v == "":
@@ -1904,6 +1938,14 @@ def get_insights(request: Request):
     auth.require_permission(request, "insights")
     with connect() as conn:
         return analytics.insights(conn)
+
+
+@app.get("/api/overview/executive")
+def overview_executive(request: Request):
+    """Bản tin điều hành (ngân sách, mục tiêu, đề xuất, nhân sự) cho Ban TGĐ."""
+    auth.require_roles(request, auth.EDIT_ALL_ROLES)
+    with connect() as conn:
+        return overview.executive(conn)
 
 
 class ChatRequest(BaseModel):

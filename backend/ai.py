@@ -103,6 +103,23 @@ def _price(model: str) -> tuple[float, float]:
     return (0.0, 0.0)  # model không phải Claude: không tính
 
 
+# Giá Gemini USD / 1 triệu token (input, output) lấy từ trang tổng hợp bên thứ ba, chưa đối chiếu trang giá chính thức Google:
+# chỉnh bằng AZB_PRICE_GEMINI=in,out. Dùng cho OCR bằng Gemini (AZB_OCR_ENGINE=gemini) và so sánh đọc scan (ocr_compare).
+_GEMINI_PRICE_DEFAULT = (0.50, 3.00)
+
+
+def gemini_price() -> tuple[float, float]:
+    try:
+        p_in, p_out = (float(x) for x in os.environ.get("AZB_PRICE_GEMINI", "").split(","))
+        return p_in, p_out
+    except ValueError:
+        return _GEMINI_PRICE_DEFAULT
+
+
+def gemini_ocr_model() -> str:
+    return os.environ.get("AZB_GEMINI_OCR_MODEL") or os.environ.get("AZB_GEMINI_MODEL", "gemini-3.8-flash")
+
+
 usage_user: contextvars.ContextVar[int | None] = contextvars.ContextVar("usage_user", default=None)  # người gây ra lần gọi nền
 
 
@@ -115,10 +132,17 @@ def log_usage(kind: str, model: str, usage, label: str = "") -> None:
         u = tmp.get("usage")
         if not u:
             return
+        log_cost(kind, model, u["input"] + u["cache_read"] + u["cache_write"], u["output"], u["cost_usd"], label)
+    except Exception:
+        pass
+
+
+def log_cost(kind: str, model: str, input_tokens: int, output_tokens: int, cost_usd: float, label: str = "") -> None:
+    """Ghi sẵn số token và tiền (nhà cung cấp không phải Anthropic, như Gemini) vào ai_usage_log. Lỗi ghi log không làm hỏng việc đang làm."""
+    try:
         with connect() as conn:
             conn.execute("INSERT INTO ai_usage_log (kind, label, model, input_tokens, output_tokens, cost_usd, user_id) VALUES (?,?,?,?,?,?,?)",
-                         (kind, (label or "")[:200], model, u["input"] + u["cache_read"] + u["cache_write"], u["output"], u["cost_usd"],
-                          usage_user.get()))
+                         (kind, (label or "")[:200], model, input_tokens, output_tokens, cost_usd, usage_user.get()))
     except Exception:
         pass
 
